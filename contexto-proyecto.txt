@@ -1,0 +1,1323 @@
+======================================================================
+DISTRIBUCIÓN DE TRABAJO
+TALLER PRÁCTICO AVANZADO — PATRÓN SAGA BANCARIO
+===============================================
+
+PROYECTO:
+NovaBank International — Transacciones Distribuidas con Saga
+
+OBJETIVO:
+Implementar un sistema bancario distribuido capaz de ejecutar
+transferencias interbancarias utilizando el Patrón Saga, demostrando
+tanto Orquestación como Coreografía, manejo de fallos, compensaciones,
+consistencia eventual, idempotencia y observabilidad.
+
+======================================================================
+
+1. CONTEXTO DEL TALLER
+   ======================================================================
+
+El equipo representa al área de arquitectura e ingeniería del banco
+privado "NovaBank International".
+
+El banco procesa transferencias interbancarias de alto valor y necesita
+abandonar mecanismos tradicionales basados en bloqueos globales de
+bases de datos, como Two-Phase Commit (2PC).
+
+La solución debe utilizar el Patrón Saga bajo el modelo BASE:
+
+```
+Basically Available
+Soft state
+Eventual consistency
+```
+
+El objetivo principal del taller es demostrar correctamente:
+
+```
+- Transacciones distribuidas.
+- Manejo de fallos.
+- Consistencia eventual.
+- Transacciones locales.
+- Compensaciones.
+- Compensaciones ejecutadas en orden inverso.
+- Idempotencia.
+- Diferencia entre Orquestación y Coreografía.
+- Observabilidad del flujo.
+```
+
+======================================================================
+2. REQUISITOS OBLIGATORIOS DEL TALLER
+=====================================
+
+El sistema debe contar con las siguientes capas.
+
+---
+
+## 2.1 FRONTEND + SIMULADOR DE CAOS
+
+Debe permitir:
+
+```
+- Ingresar cuenta origen.
+- Ingresar cuenta destino.
+- Ingresar importe.
+- Ejecutar una transferencia.
+- Activar errores intencionalmente.
+- Visualizar el avance de cada paso.
+- Visualizar las compensaciones.
+- Mostrar los estados de la Saga en tiempo real.
+```
+
+El frontend debe permitir demostrar fácilmente los casos de prueba
+solicitados por el taller.
+
+---
+
+## 2.2 BACKEND / API GATEWAY
+
+Debe funcionar como punto de entrada central.
+
+Responsabilidades principales:
+
+```
+- Recibir solicitudes del frontend.
+- Generar/utilizar identificadores de idempotencia UUID.
+- Registrar la transferencia.
+- Despachar las operaciones hacia los servicios bancarios.
+- Devolver el estado de la operación.
+```
+
+---
+
+## 2.3 MICROSERVICIOS DE DOMINIO BANCARIO
+
+Se requieren como mínimo tres microservicios independientes.
+
+MICROSERVICIO 1:
+Account & Ledger
+
+Responsabilidades:
+
+```
+- Débitos.
+- Créditos.
+- Reversas de balance.
+- Registro de movimientos.
+```
+
+MICROSERVICIO 2:
+Risk / Fraud
+
+Responsabilidades:
+
+```
+- Reglas de validación.
+- Prevención de fraude.
+- Límites diarios.
+- Aprobación/rechazo de operaciones.
+```
+
+MICROSERVICIO 3:
+Interbank Clearing Gateway
+
+Responsabilidades:
+
+```
+- Simular la liquidación externa.
+- Simular fallos de red.
+- Simular timeouts.
+- Confirmar o rechazar operaciones.
+```
+
+Cada servicio debe tener almacenamiento propio y desacoplado,
+utilizando Database-per-Service o esquemas lógicamente aislados.
+
+---
+
+## 2.4 PATRÓN SAGA
+
+Esta es la parte de mayor peso en la evaluación.
+
+El sistema debe:
+
+```
+- Coordinar transacciones locales.
+- Detectar fallos.
+- Ejecutar compensaciones.
+- Ejecutar las compensaciones en orden inverso.
+- Evitar estados inconsistentes.
+- Demostrar tanto Orquestación como Coreografía.
+```
+
+---
+
+## 2.5 OBSERVABILIDAD
+
+Debe existir un mecanismo de observabilidad utilizando Prefect o
+una alternativa equivalente.
+
+Debe permitir visualizar:
+
+```
+- Operaciones en ejecución.
+- Operaciones fallidas.
+- Operaciones compensadas.
+- Cambios de estado.
+- Trazabilidad de la transferencia.
+- Auditoría.
+```
+
+También deben existir delays configurables de aproximadamente
+2 a 4 segundos para que durante la demostración pueda observarse
+cada paso de la Saga.
+
+======================================================================
+3. ORQUESTACIÓN VS COREOGRAFÍA
+==============================
+
+El taller exige implementar las DOS modalidades.
+
+---
+
+## 3.1 SAGA ORQUESTADA
+
+Existe un orquestador central.
+
+El orquestador:
+
+```
+1. Ordena ejecutar una operación.
+2. Espera su resultado.
+3. Continúa con el siguiente servicio.
+4. Detecta un fallo.
+5. Identifica qué operaciones anteriores tuvieron éxito.
+6. Ejecuta explícitamente las compensaciones.
+```
+
+Ejemplo:
+
+```
+Account Debit
+      |
+      v
+Risk Check
+      |
+      v
+Clearing
+      |
+      X FALLA
+      |
+      v
+Compensate Risk
+      |
+      v
+Compensate Debit
+```
+
+---
+
+## 3.2 SAGA COREOGRAFIADA
+
+No existe un coordinador central.
+
+Los servicios se comunican mediante eventos.
+
+Ejemplo:
+
+```
+TransferenciaSolicitada
+        |
+        v
+SaldoDebitado
+        |
+        v
+RiesgoAprobado
+        |
+        v
+ClearingSolicitado
+        |
+        v
+TransferenciaCompletada
+```
+
+Si ocurre un fallo:
+
+```
+TransferenciaFallida
+```
+
+Los servicios que corresponda reaccionan autónomamente y ejecutan
+sus propias compensaciones.
+
+======================================================================
+4. CASOS DE PRUEBA OBLIGATORIOS
+===============================
+
+CP-01 — CAMINO FELIZ
+
+```
+Transferencia normal sin errores.
+```
+
+Debe ocurrir:
+
+```
+- Débito en cuenta origen.
+- Aprobación de riesgo.
+- Liquidación interbancaria.
+- Crédito en cuenta destino.
+```
+
+Resultado:
+
+```
+CONFIRMADO
+```
+
+---
+
+## CP-02 — FONDOS INSUFICIENTES
+
+El monto de la transferencia supera el saldo disponible.
+
+Debe ocurrir:
+
+```
+- Rechazo inmediato.
+- No deben ejecutarse compensaciones.
+- No deben modificarse los saldos.
+```
+
+Resultado:
+
+```
+RECHAZADO_FONDOS
+```
+
+---
+
+## CP-03 — FALLA DE RIESGO / ANTIFRAUDE
+
+Se activa un switch para forzar el fallo de riesgo.
+
+Debe ocurrir:
+
+```
+1. Se realiza el débito.
+2. Risk/Fraud rechaza la operación.
+3. Se inicia compensación.
+4. Se revierte el débito.
+```
+
+Resultado:
+
+```
+- Saldo origen completamente restaurado.
+- Estado RECHAZADO_RIESGO.
+```
+
+---
+
+## CP-04 — CAÍDA / TIMEOUT DE RED EXTERNA
+
+Se activa un switch para provocar un timeout en Clearing.
+
+Debe ocurrir:
+
+```
+1. Se realiza el débito.
+2. Riesgo aprueba.
+3. Clearing falla.
+4. Se anula la aprobación de riesgo.
+5. Se revierte el débito.
+6. Se registra auditoría.
+```
+
+Resultado:
+
+```
+- Saldos íntegros.
+- Estado RECHAZADO_RED.
+- Bitácora de auditoría.
+```
+
+---
+
+## CP-05 — IDEMPOTENCIA
+
+Se reenvía la misma operación utilizando el mismo identificador.
+
+Debe ocurrir:
+
+```
+- El sistema reconoce el duplicado.
+- No se realiza un segundo débito.
+- No se realiza un segundo cobro.
+- Los reintentos no modifican los saldos.
+```
+
+Objetivo:
+
+```
+Demostrar que una transferencia no puede ejecutarse dos veces
+accidentalmente debido a reintentos.
+```
+
+======================================================================
+5. DISTRIBUCIÓN DEL TRABAJO ENTRE 3 PERSONAS
+============================================
+
+######################################################################
+PERSONA 1 — BACKEND + MICROSERVICIOS
+######################################################################
+
+RESPONSABILIDAD PRINCIPAL:
+
+Construir la infraestructura de backend y los tres microservicios
+bancarios que ejecutarán las operaciones locales.
+
+La Persona 1 debe garantizar que los servicios tengan APIs claras,
+datos aislados, operaciones locales consistentes e idempotencia.
+
+---
+
+## 5.1 API GATEWAY
+
+Construir el punto de entrada del sistema.
+
+Responsabilidades:
+
+```
+- Endpoint principal de transferencia.
+- Recepción de datos desde frontend.
+- Generación/manejo de UUID.
+- Idempotency-Key.
+- Validación de requests.
+- Comunicación con los microservicios.
+- Respuesta al frontend.
+- Manejo de errores.
+```
+
+---
+
+## 5.2 ACCOUNT & LEDGER SERVICE
+
+Construir el servicio encargado de cuentas y balances.
+
+Debe permitir:
+
+```
+- Consultar cuenta.
+- Consultar saldo.
+- Debitar.
+- Acreditar.
+- Registrar movimientos.
+- Revertir débitos.
+- Revertir créditos.
+```
+
+Debe garantizar:
+
+```
+- No permitir débitos sin fondos.
+- No ejecutar dos veces la misma operación.
+- Registrar cada movimiento.
+- Permitir compensación.
+```
+
+---
+
+## 5.3 RISK / FRAUD SERVICE
+
+Construir el servicio de riesgo.
+
+Debe permitir:
+
+```
+- Evaluar una transferencia.
+- Aprobar una transferencia.
+- Rechazar una transferencia.
+- Aplicar reglas de riesgo.
+- Simular un fallo mediante un switch/flag.
+- Registrar la evaluación.
+- Compensar/cancelar la aprobación cuando sea necesario.
+```
+
+---
+
+## 5.4 CLEARING GATEWAY SERVICE
+
+Construir el servicio que simula el sistema externo de liquidación.
+
+Debe permitir:
+
+```
+- Recibir una solicitud de clearing.
+- Procesar una transferencia.
+- Simular latencia.
+- Simular timeout.
+- Confirmar operación.
+- Rechazar operación.
+- Ejecutar compensación cuando corresponda.
+```
+
+---
+
+## 5.5 BASE DE DATOS
+
+Integrar los microservicios con la base de datos.
+
+IMPORTANTE:
+
+```
+Cada microservicio debe mantener sus datos aislados.
+```
+
+Aunque se utilice una misma instancia PostgreSQL/Supabase, los
+dominios no deben acceder directamente a las estructuras de datos
+de otros servicios.
+
+Ejemplo:
+
+```
+Account Service
+    -> cuentas
+    -> movimientos
+
+Risk Service
+    -> evaluaciones de riesgo
+    -> reglas/resultados
+
+Clearing Service
+    -> operaciones de clearing
+    -> estados de liquidación
+```
+
+---
+
+## 5.6 IDEMPOTENCIA
+
+Implementar el mecanismo que impide dobles cobros.
+
+Debe utilizar:
+
+```
+UUID / Idempotency-Key
+```
+
+Ejemplo:
+
+```
+Primera solicitud:
+    transfer_id = ABC
+
+    -> ejecuta débito.
+
+Segunda solicitud:
+    transfer_id = ABC
+
+    -> NO ejecuta otro débito.
+    -> devuelve el resultado existente.
+```
+
+---
+
+## 5.7 TECNOLOGÍA RECOMENDADA
+
+Stack recomendado:
+
+```
+Python 3.12+
+FastAPI
+Pydantic
+SQLAlchemy
+Alembic
+PostgreSQL / Supabase
+httpx
+pytest
+Docker
+Docker Compose
+Git / GitHub
+```
+
+Este stack no es obligatorio por el taller, pero encaja bien con
+el proyecto y permite mantener todo sencillo y ejecutable localmente.
+
+---
+
+## 5.8 ENTREGABLE DE PERSONA 1
+
+Debe entregar:
+
+```
+[ ] API Gateway funcionando.
+[ ] Account & Ledger funcionando.
+[ ] Risk/Fraud funcionando.
+[ ] Clearing Gateway funcionando.
+[ ] Base de datos conectada.
+[ ] Datos aislados por servicio.
+[ ] Idempotencia funcionando.
+[ ] Endpoints de operaciones normales.
+[ ] Endpoints de compensación.
+[ ] Dockerfiles.
+[ ] Configuración Docker Compose.
+[ ] Tests básicos.
+[ ] Documentación de endpoints.
+```
+
+######################################################################
+PERSONA 2 — SAGA + ARQUITECTURA DISTRIBUIDA
+######################################################################
+
+RESPONSABILIDAD PRINCIPAL:
+
+Construir el corazón de la transacción distribuida.
+
+La Persona 2 recibe los servicios de la Persona 1 y construye encima
+de ellos las dos implementaciones requeridas:
+
+```
+1. Saga Orchestration
+2. Saga Choreography
+```
+
+---
+
+## 5.9 SAGA ORCHESTRATION
+
+Construir el flujo central de la Saga.
+
+Flujo base:
+
+```
+1. Crear transferencia.
+2. Debitar cuenta origen.
+3. Validar riesgo.
+4. Ejecutar clearing.
+5. Acreditar cuenta destino.
+6. Finalizar.
+```
+
+Si ocurre un fallo:
+
+```
+1. Detectar fallo.
+2. Determinar qué pasos terminaron correctamente.
+3. Cambiar estado a compensación.
+4. Ejecutar compensaciones en orden inverso.
+5. Registrar cada compensación.
+6. Finalizar como compensado/rechazado.
+```
+
+---
+
+## 5.10 SAGA CHOREOGRAPHY
+
+Construir la segunda implementación de Saga utilizando eventos.
+
+Ejemplos de eventos:
+
+```
+TransferRequested
+BalanceDebited
+RiskApproved
+RiskRejected
+ClearingRequested
+TransferCompleted
+TransferFailed
+DebitCompensationRequested
+RiskCompensationRequested
+DebitCompensated
+RiskCompensated
+```
+
+Cada servicio debe reaccionar a los eventos correspondientes.
+
+---
+
+## 5.11 MESSAGE BROKER / EVENT BUS
+
+Configurar el mecanismo de comunicación entre servicios para
+la coreografía.
+
+Puede utilizarse cualquier tecnología adecuada.
+
+El taller permite libertad tecnológica.
+
+La responsabilidad de Persona 2 es definir:
+
+```
+- Eventos.
+- Payloads.
+- Productores.
+- Consumidores.
+- Flujo de eventos.
+- Manejo de errores.
+```
+
+---
+
+## 5.12 COMPENSACIONES
+
+Implementar la lógica de compensación.
+
+Regla fundamental:
+
+```
+Las compensaciones deben ejecutarse en orden inverso.
+```
+
+Ejemplo:
+
+```
+Debit
+   |
+   v
+Risk
+   |
+   v
+Clearing
+   |
+   X FALLA
+   |
+   v
+Compensate Risk
+   |
+   v
+Compensate Debit
+```
+
+Nunca debe compensarse una operación que nunca se ejecutó.
+
+---
+
+## 5.13 RETRIES Y TIMEOUTS
+
+Implementar mecanismos para:
+
+```
+- Timeouts.
+- Reintentos cuando sean apropiados.
+- Detección de fallos.
+- Prevención de estados indefinidos.
+- Manejo de errores de comunicación.
+```
+
+---
+
+## 5.14 CONSISTENCIA EVENTUAL / BASE
+
+Debe poder explicarse y demostrarse que:
+
+```
+- Cada servicio mantiene su propia transacción local.
+- No existe una transacción global ACID.
+- El sistema puede pasar temporalmente por estados intermedios.
+- La Saga finalmente lleva el sistema a un estado consistente.
+- Las compensaciones restauran el estado cuando ocurre un fallo.
+```
+
+---
+
+## 5.15 ENTREGABLE DE PERSONA 2
+
+Debe entregar:
+
+```
+[ ] Saga Orchestration funcionando.
+[ ] Saga Choreography funcionando.
+[ ] Event Bus / Message Broker.
+[ ] Eventos definidos.
+[ ] Flujo de compensación.
+[ ] Compensaciones en orden inverso.
+[ ] Manejo de errores.
+[ ] Timeouts.
+[ ] Retries cuando corresponda.
+[ ] Estados de Saga.
+[ ] Integración con los microservicios.
+[ ] Demostración de CP-01 a CP-05.
+```
+
+######################################################################
+PERSONA 3 — FRONTEND + OBSERVABILIDAD + TESTING
+######################################################################
+
+RESPONSABILIDAD PRINCIPAL:
+
+Construir la interfaz que permita utilizar y demostrar el sistema,
+además de la visualización del flujo distribuido y las pruebas.
+
+---
+
+## 5.16 FRONTEND
+
+Construir la interfaz de usuario.
+
+Debe permitir:
+
+```
+- Cuenta origen.
+- Cuenta destino.
+- Importe.
+- Ejecutar transferencia.
+- Visualizar resultado.
+- Visualizar estado actual.
+- Visualizar cada paso.
+```
+
+---
+
+## 5.17 SIMULADOR DE CAOS
+
+El frontend debe tener controles para provocar los errores obligatorios.
+
+Mínimo:
+
+```
+[ ] Forzar fallo de Risk/Fraud.
+[ ] Forzar timeout de Clearing.
+```
+
+Opcionalmente:
+
+```
+[ ] Configurar delays.
+[ ] Simular errores adicionales.
+```
+
+---
+
+## 5.18 VISUALIZACIÓN DE LA SAGA
+
+Debe mostrar visualmente algo parecido a:
+
+```
+[1] Transferencia creada
+        |
+        v
+[2] Débito
+        |
+        v
+[3] Validación de riesgo
+        |
+        v
+[4] Clearing
+        |
+        v
+[5] Crédito
+        |
+        v
+[6] COMPLETADA
+```
+
+En caso de error:
+
+```
+[1] Transferencia creada
+        |
+        v
+[2] Débito OK
+        |
+        v
+[3] Riesgo FALLA
+        |
+        v
+[4] Compensando
+        |
+        v
+[5] Débito revertido
+        |
+        v
+[6] COMPENSADA
+```
+
+---
+
+## 5.19 OBSERVABILIDAD
+
+Integrar Prefect o una alternativa equivalente.
+
+Debe permitir observar:
+
+```
+- Inicio de operación.
+- Ejecución.
+- Estados.
+- Fallos.
+- Compensaciones.
+- Finalización.
+- Trazabilidad.
+```
+
+---
+
+## 5.20 DELAYS
+
+Implementar delays configurables de aproximadamente:
+
+```
+2 a 4 segundos
+```
+
+La finalidad es que durante la demostración pueda verse claramente
+cómo avanza la Saga y cómo retrocede cuando ocurre un fallo.
+
+---
+
+## 5.21 AUDITORÍA
+
+Debe registrarse:
+
+```
+- transfer_id.
+- Paso ejecutado.
+- Servicio.
+- Estado.
+- Error.
+- Timestamp.
+- Compensación.
+- Resultado final.
+```
+
+---
+
+## 5.22 TESTING
+
+Persona 3 debe coordinar y verificar los cinco casos obligatorios:
+
+```
+CP-01 — Éxito.
+CP-02 — Fondos insuficientes.
+CP-03 — Riesgo/Fraude.
+CP-04 — Timeout de Clearing.
+CP-05 — Idempotencia.
+```
+
+---
+
+## 5.23 VIDEO DE DEMOSTRACIÓN
+
+El taller exige un video demostrativo funcional de máximo:
+
+```
+6 minutos
+```
+
+El video debe mostrar principalmente:
+
+```
+1. Transferencia exitosa.
+2. Fondos insuficientes.
+3. Fallo de riesgo.
+4. Timeout de Clearing.
+5. Idempotencia.
+6. Compensaciones.
+7. Observabilidad.
+```
+
+---
+
+## 5.24 ENTREGABLE DE PERSONA 3
+
+Debe entregar:
+
+```
+[ ] Frontend funcional.
+[ ] Formulario de transferencia.
+[ ] Simulador de caos.
+[ ] Visualización paso a paso.
+[ ] Estados en tiempo real.
+[ ] Observabilidad.
+[ ] Delays configurables.
+[ ] Auditoría.
+[ ] Pruebas CP-01 a CP-05.
+[ ] Video de máximo 6 minutos.
+```
+
+======================================================================
+6. CÓMO SE INTEGRA EL TRABAJO DE LAS 3 PERSONAS
+===============================================
+
+La división no significa que cada persona trabaje aislada.
+
+La integración debe seguir este orden:
+
+FASE 1 — PERSONA 1
+
+Construye los servicios:
+
+```
+API Gateway
+Account Service
+Risk Service
+Clearing Service
+```
+
+Y define claramente:
+
+```
+- Endpoints.
+- Requests.
+- Responses.
+- Estados.
+- Errores.
+- Operaciones de compensación.
+```
+
+FASE 2 — PERSONA 2
+
+Utiliza los endpoints de Persona 1 para construir:
+
+```
+Saga Orchestration
+Saga Choreography
+```
+
+Persona 2 NO debería modificar directamente la lógica interna
+de los microservicios.
+
+Debe comunicarse con ellos mediante los contratos definidos.
+
+FASE 3 — PERSONA 3
+
+Utiliza el API Gateway y la información de estados/eventos para:
+
+```
+- Crear la interfaz.
+- Activar errores.
+- Mostrar estados.
+- Mostrar compensaciones.
+- Ejecutar pruebas.
+```
+
+FASE 4 — INTEGRACIÓN
+
+Las tres personas ejecutan conjuntamente:
+
+```
+CP-01
+CP-02
+CP-03
+CP-04
+CP-05
+```
+
+======================================================================
+7. CONTRATO ENTRE LAS PERSONAS
+==============================
+
+Para evitar problemas de integración, una vez definidos los contratos:
+
+```
+- No cambiar endpoints unilateralmente.
+- No cambiar nombres de campos sin avisar.
+- No cambiar estados sin avisar.
+- No cambiar eventos sin avisar.
+- No cambiar formatos JSON sin avisar.
+```
+
+Si se necesita modificar algo:
+
+```
+1. Se informa al equipo.
+2. Se acuerda el cambio.
+3. Se actualiza la documentación.
+4. Se actualiza el código.
+5. Se prueban nuevamente las integraciones.
+```
+
+======================================================================
+8. ORDEN RECOMENDADO DE DESARROLLO
+==================================
+
+DÍA 1
+
+```
+PERSONA 1:
+    - Crear repositorio.
+    - Crear estructura.
+    - Crear API Gateway.
+    - Crear Account Service.
+    - Crear modelos iniciales.
+
+PERSONA 2:
+    - Diseñar estados de Saga.
+    - Diseñar flujo de Orquestación.
+    - Diseñar flujo de Coreografía.
+    - Definir eventos.
+
+PERSONA 3:
+    - Diseñar interfaz.
+    - Diseñar flujo visual.
+    - Diseñar switches de caos.
+```
+
+DÍAS 2-3
+
+```
+PERSONA 1:
+    - Terminar Account Service.
+    - Crear Risk Service.
+    - Crear Clearing Service.
+    - Implementar base de datos.
+    - Implementar compensaciones.
+
+PERSONA 2:
+    - Implementar Orquestación.
+    - Conectar servicios.
+    - Implementar manejo de errores.
+
+PERSONA 3:
+    - Construir frontend.
+    - Conectar API Gateway.
+```
+
+DÍAS 4-5
+
+```
+PERSONA 1:
+    - Idempotencia.
+    - Tests.
+    - Docker.
+    - Corrección de errores.
+
+PERSONA 2:
+    - Implementar Coreografía.
+    - Message Broker.
+    - Eventos.
+    - Compensaciones.
+
+PERSONA 3:
+    - Observabilidad.
+    - Prefect/dashboard.
+    - Delays.
+    - Visualización de estados.
+```
+
+DÍAS 6-7
+
+```
+TODO EL EQUIPO:
+
+    - Integración completa.
+    - CP-01.
+    - CP-02.
+    - CP-03.
+    - CP-04.
+    - CP-05.
+    - Corrección de errores.
+    - Documentación.
+    - Diagramas.
+    - Video.
+    - Prueba final de despliegue.
+```
+
+======================================================================
+9. ENTREGABLES FINALES DEL EQUIPO
+=================================
+
+El equipo debe entregar:
+
+```
+1. REPOSITORIO GIT
+   Con código ejecutable e instrucciones claras de despliegue.
+
+2. IMPLEMENTACIÓN SAGA
+   Orquestación y Coreografía.
+
+3. MICROSERVICIOS
+   Account & Ledger.
+   Risk/Fraud.
+   Clearing Gateway.
+
+4. FRONTEND
+   Con simulador de caos y visualización.
+
+5. OBSERVABILIDAD
+   Prefect o alternativa equivalente.
+   Delays.
+   Trazabilidad.
+   Auditoría.
+
+6. DOCUMENTACIÓN
+   Comparación entre Orquestación y Coreografía.
+
+7. VIDEO
+   Máximo 6 minutos.
+   Debe mostrar fallos y compensaciones.
+```
+
+======================================================================
+10. RÚBRICA DE EVALUACIÓN
+=========================
+
+La distribución del esfuerzo debe tener en cuenta el peso real
+de la evaluación.
+
+```
+1. Lógica Saga + Compensaciones
+   40%
+   2.0 puntos
+
+   ES EL CRITERIO MÁS IMPORTANTE.
+
+
+2. Orquestación vs Coreografía
+   20%
+   1.0 punto
+
+
+3. Observabilidad + Delays + Trazabilidad
+   15%
+   0.75 puntos
+
+
+4. Frontend + Simulador de Caos
+   10%
+   0.50 puntos
+
+
+5. Microservicios + Aislamiento de Datos
+   10%
+   0.50 puntos
+
+
+6. Documentación + Video + Despliegue
+   5%
+   0.25 puntos
+
+
+TOTAL:
+   100%
+   5.0 puntos
+```
+
+======================================================================
+11. PRIORIDADES DEL EQUIPO
+==========================
+
+La prioridad NO debe ser hacer una interfaz visualmente compleja.
+
+Las prioridades deben ser:
+
+```
+1. Saga funcionando correctamente.
+2. Compensaciones funcionando correctamente.
+3. Orquestación funcionando.
+4. Coreografía funcionando.
+5. Casos de fallo funcionando.
+6. Idempotencia funcionando.
+7. Observabilidad.
+8. Frontend.
+9. Documentación y video.
+```
+
+======================================================================
+12. DEFINICIÓN DE "TERMINADO"
+=============================
+
+El proyecto solamente debe considerarse terminado cuando:
+
+```
+[ ] CP-01 funciona.
+[ ] CP-02 funciona.
+[ ] CP-03 funciona.
+[ ] CP-04 funciona.
+[ ] CP-05 funciona.
+
+[ ] Las compensaciones realmente revierten las operaciones.
+
+[ ] Las compensaciones se ejecutan en orden inverso.
+
+[ ] No se compensa una operación que nunca ocurrió.
+
+[ ] No existen dobles cobros ante reintentos.
+
+[ ] Los tres microservicios están aislados.
+
+[ ] Orquestación funciona.
+
+[ ] Coreografía funciona.
+
+[ ] Se pueden visualizar los estados.
+
+[ ] Existen delays configurables.
+
+[ ] Existe auditoría/trazabilidad.
+
+[ ] El frontend permite provocar los fallos.
+
+[ ] El proyecto puede ejecutarse siguiendo el README.
+
+[ ] El video demuestra los casos principales.
+```
+
+======================================================================
+13. RESULTADO ESPERADO
+======================
+
+Al finalizar, el equipo debe poder demostrar algo como:
+
+```
+TRANSFERENCIA
+     |
+     v
+API GATEWAY
+     |
+     v
+ACCOUNT
+     |
+     v
+RISK
+     |
+     v
+CLEARING
+     |
+     v
+ACCOUNT / CREDIT
+     |
+     v
+CONFIRMADO
+```
+
+Y cuando ocurre un fallo:
+
+```
+TRANSFERENCIA
+     |
+     v
+ACCOUNT
+     |
+     v
+RISK
+     |
+     X
+   FALLA
+     |
+     v
+COMPENSACIÓN
+     |
+     v
+ACCOUNT REVERSE
+     |
+     v
+ESTADO CONSISTENTE
+```
+
+El mismo sistema debe poder demostrar este comportamiento utilizando
+tanto:
+
+```
+SAGA ORCHESTRATION
+```
+
+como:
+
+```
+SAGA CHOREOGRAPHY.
+```
+
+======================================================================
+FIN DEL DOCUMENTO DE DISTRIBUCIÓN DE TRABAJO
+============================================

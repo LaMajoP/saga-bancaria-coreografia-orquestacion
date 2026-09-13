@@ -1,0 +1,1487 @@
+============================================================
+CONTRATO DE INTEGRACIÓN — SAGA BANCARIA
+NovaBank International
+======================
+
+Proyecto:
+Taller Práctico Avanzado: Implementación del Patrón Saga Bancario,
+Coreografía vs. Orquestación y Observabilidad.
+
+Objetivo:
+Definir un contrato común entre los integrantes del equipo para que
+Frontend, API Gateway, microservicios, Saga, mensajería y observabilidad
+puedan integrarse sin modificar unilateralmente endpoints, estructuras
+de datos o estados.
+
+============================================================
+
+1. ARQUITECTURA GENERAL
+   ============================================================
+
+La aplicación se ejecutará localmente utilizando Docker/Docker Compose.
+
+La base de datos será Supabase PostgreSQL.
+
+Componentes:
+
+```
+Frontend
+    |
+    v
+API Gateway :8000
+    |
+    +--------------------+
+    |                    |
+    v                    v
+Account Service      Risk Service
+    :8001                :8002
+    |
+    |
+    v
+Clearing Service
+    :8003
+```
+
+Además:
+
+```
+Saga Orchestration
+Saga Choreography
+Message Broker / Event Bus
+Observabilidad / Prefect
+```
+
+Los servicios se ejecutan localmente.
+
+Supabase será utilizado como PostgreSQL remoto.
+
+Cada microservicio debe mantener aislamiento lógico de sus datos.
+Preferiblemente utilizando schemas/tablas propias dentro de Supabase.
+
+============================================================
+2. CONVENCIONES GENERALES
+=========================
+
+Formato de comunicación:
+
+```
+JSON
+```
+
+Convención de nombres:
+
+```
+snake_case
+```
+
+Ejemplo:
+
+```
+source_account_id
+destination_account_id
+transfer_id
+force_risk_failure
+```
+
+Todos los identificadores de operaciones Saga utilizarán:
+
+```
+UUID v4
+```
+
+Ejemplo:
+
+```
+550e8400-e29b-41d4-a716-446655440000
+```
+
+============================================================
+3. IDEMPOTENCIA
+===============
+
+Toda transferencia debe tener un identificador único:
+
+```
+transfer_id
+```
+
+Además, las solicitudes externas deben poder utilizar:
+
+```
+Idempotency-Key
+```
+
+Ejemplo:
+
+```
+Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
+```
+
+Regla:
+
+Si se recibe nuevamente una operación con el mismo Idempotency-Key,
+NO se debe ejecutar nuevamente el débito, crédito o cualquier otra
+operación irreversible.
+
+La segunda solicitud debe devolver el resultado previamente registrado.
+
+Objetivo:
+
+Evitar doble cobro cuando el cliente reintenta una operación.
+
+============================================================
+4. ESTADOS DE UNA TRANSFERENCIA
+===============================
+
+Estados oficiales:
+
+```
+PENDING
+DEBITED
+RISK_APPROVED
+RISK_REJECTED
+CLEARING_PENDING
+COMPLETED
+COMPENSATING
+COMPENSATED
+REJECTED_FUNDS
+REJECTED_RISK
+REJECTED_NETWORK
+```
+
+Descripción:
+
+PENDING
+La transferencia fue creada pero todavía no ha ejecutado operaciones.
+
+DEBITED
+El dinero fue debitado correctamente de la cuenta origen.
+
+RISK_APPROVED
+El sistema de riesgo aprobó la transferencia.
+
+RISK_REJECTED
+El sistema de riesgo rechazó la transferencia.
+
+CLEARING_PENDING
+La transferencia fue enviada al proceso de compensación interbancaria.
+
+COMPLETED
+Todas las operaciones finalizaron correctamente.
+
+COMPENSATING
+La Saga está ejecutando operaciones de compensación.
+
+COMPENSATED
+Las operaciones anteriores fueron revertidas correctamente.
+
+REJECTED_FUNDS
+La transferencia fue rechazada por fondos insuficientes.
+
+REJECTED_RISK
+La transferencia fue rechazada por riesgo/fraude.
+
+REJECTED_NETWORK
+La transferencia fue rechazada debido a un problema con el
+sistema de compensación interbancaria.
+
+============================================================
+5. RESPUESTAS HTTP ESTÁNDAR
+===========================
+
+Respuesta exitosa:
+
+{
+"success": true,
+"transfer_id": "uuid",
+"status": "DEBITED",
+"message": "Operation completed successfully"
+}
+
+Respuesta de error:
+
+{
+"success": false,
+"transfer_id": "uuid",
+"status": "FAILED",
+"error_code": "INSUFFICIENT_FUNDS",
+"message": "Insufficient funds"
+}
+
+============================================================
+6. API GATEWAY
+==============
+
+Puerto:
+
+```
+8000
+```
+
+Endpoint principal:
+
+```
+POST /transfers
+```
+
+Request:
+
+{
+"source_account_id": "ACC-001",
+"destination_account_id": "ACC-002",
+"amount": 500000,
+"force_risk_failure": false,
+"force_clearing_timeout": false
+}
+
+Campos:
+
+```
+source_account_id
+    Cuenta que envía el dinero.
+
+destination_account_id
+    Cuenta que recibe el dinero.
+
+amount
+    Valor de la transferencia.
+
+force_risk_failure
+    Fuerza un rechazo del servicio de riesgo para pruebas.
+
+force_clearing_timeout
+    Fuerza un timeout del servicio de clearing para pruebas.
+```
+
+Respuesta:
+
+{
+"success": true,
+"transfer_id": "uuid",
+"status": "PENDING"
+}
+
+El API Gateway es el punto de entrada principal para el Frontend.
+
+============================================================
+7. ACCOUNT & LEDGER SERVICE
+===========================
+
+Puerto:
+
+```
+8001
+```
+
+Responsabilidad:
+
+```
+- Consultar cuentas.
+- Debitar dinero.
+- Acreditar dinero.
+- Registrar movimientos.
+- Ejecutar compensaciones.
+- Mantener consistencia local de las operaciones de cuentas.
+```
+
+Este servicio debe tener almacenamiento propio y aislado.
+
+---
+
+## 7.1 CONSULTAR CUENTA
+
+GET /accounts/{account_id}
+
+Ejemplo:
+
+GET /accounts/ACC-001
+
+Respuesta:
+
+{
+"account_id": "ACC-001",
+"balance": 1500000,
+"currency": "COP"
+}
+
+---
+
+## 7.2 DEBITAR CUENTA
+
+POST /accounts/{account_id}/debit
+
+Request:
+
+{
+"transfer_id": "uuid",
+"amount": 500000
+}
+
+Respuesta exitosa:
+
+{
+"success": true,
+"transfer_id": "uuid",
+"account_id": "ACC-001",
+"amount": 500000,
+"status": "DEBITED"
+}
+
+Si no existen fondos suficientes:
+
+{
+"success": false,
+"transfer_id": "uuid",
+"status": "REJECTED_FUNDS",
+"error_code": "INSUFFICIENT_FUNDS",
+"message": "Insufficient funds"
+}
+
+IMPORTANTE:
+
+Cuando existe insuficiencia de fondos NO se ejecuta compensación,
+porque el débito nunca ocurrió.
+
+---
+
+## 7.3 ACREDITAR CUENTA
+
+POST /accounts/{account_id}/credit
+
+Request:
+
+{
+"transfer_id": "uuid",
+"amount": 500000
+}
+
+Respuesta:
+
+{
+"success": true,
+"transfer_id": "uuid",
+"account_id": "ACC-002",
+"amount": 500000,
+"status": "COMPLETED"
+}
+
+---
+
+## 7.4 COMPENSAR DÉBITO
+
+POST /accounts/{account_id}/debit/compensate
+
+Request:
+
+{
+"transfer_id": "uuid",
+"amount": 500000
+}
+
+Objetivo:
+
+Devolver a la cuenta origen el dinero que fue debitado anteriormente.
+
+---
+
+## 7.5 COMPENSAR CRÉDITO
+
+POST /accounts/{account_id}/credit/compensate
+
+Request:
+
+{
+"transfer_id": "uuid",
+"amount": 500000
+}
+
+Objetivo:
+
+Revertir un crédito previamente realizado.
+
+La compensación solamente debe ejecutarse si el crédito original
+realmente ocurrió.
+
+============================================================
+8. RISK / FRAUD SERVICE
+=======================
+
+Puerto:
+
+```
+8002
+```
+
+Responsabilidad:
+
+```
+- Validar riesgo.
+- Aplicar reglas antifraude.
+- Validar límites diarios.
+- Aprobar o rechazar transferencias.
+- Registrar resultado de evaluación.
+- Ejecutar compensación cuando corresponda.
+```
+
+---
+
+## 8.1 VALIDAR RIESGO
+
+POST /risk/check
+
+Request:
+
+{
+"transfer_id": "uuid",
+"source_account_id": "ACC-001",
+"destination_account_id": "ACC-002",
+"amount": 500000,
+"force_failure": false
+}
+
+Respuesta aprobada:
+
+{
+"success": true,
+"transfer_id": "uuid",
+"status": "RISK_APPROVED"
+}
+
+Respuesta rechazada:
+
+{
+"success": false,
+"transfer_id": "uuid",
+"status": "RISK_REJECTED",
+"error_code": "RISK_REJECTED",
+"message": "Transfer rejected by risk service"
+}
+
+---
+
+## 8.2 COMPENSACIÓN DE RIESGO
+
+POST /risk/compensate
+
+Request:
+
+{
+"transfer_id": "uuid"
+}
+
+Objetivo:
+
+Cancelar/revertir la aprobación de riesgo asociada a una transferencia.
+
+Esta operación se ejecuta cuando una etapa posterior de la Saga falla.
+
+============================================================
+9. CLEARING / INTERBANK SERVICE
+===============================
+
+Puerto:
+
+```
+8003
+```
+
+Responsabilidad:
+
+```
+- Simular el sistema externo de compensación interbancaria.
+- Recibir solicitudes de transferencia.
+- Simular latencia.
+- Simular timeout.
+- Confirmar o rechazar operaciones.
+- Permitir compensación.
+```
+
+---
+
+## 9.1 SOLICITAR CLEARING
+
+POST /clearing/transfer
+
+Request:
+
+{
+"transfer_id": "uuid",
+"source_account_id": "ACC-001",
+"destination_account_id": "ACC-002",
+"amount": 500000,
+"force_timeout": false
+}
+
+Respuesta exitosa:
+
+{
+"success": true,
+"transfer_id": "uuid",
+"status": "COMPLETED"
+}
+
+En caso de timeout:
+
+{
+"success": false,
+"transfer_id": "uuid",
+"status": "REJECTED_NETWORK",
+"error_code": "CLEARING_TIMEOUT",
+"message": "Interbank clearing timeout"
+}
+
+---
+
+## 9.2 COMPENSACIÓN DE CLEARING
+
+POST /clearing/compensate
+
+Request:
+
+{
+"transfer_id": "uuid"
+}
+
+Objetivo:
+
+Cancelar una operación de clearing que haya sido registrada
+previamente y que requiera compensación.
+
+============================================================
+10. ORQUESTACIÓN
+================
+
+En el patrón Saga Orchestration existe un componente central que
+controla el flujo de la transacción.
+
+Flujo esperado:
+
+```
+1. Crear transferencia.
+2. Debitar cuenta origen.
+3. Validar riesgo.
+4. Ejecutar clearing.
+5. Acreditar cuenta destino.
+6. Finalizar transferencia.
+```
+
+Flujo de compensación:
+
+```
+Si una etapa falla:
+
+1. Identificar las etapas ejecutadas correctamente.
+2. Cambiar estado a COMPENSATING.
+3. Ejecutar compensaciones en orden inverso.
+4. Registrar resultado de cada compensación.
+5. Cambiar estado a COMPENSATED.
+```
+
+Ejemplo:
+
+```
+DEBIT
+    |
+    v
+RISK
+    |
+    v
+CLEARING ---- FALLA
+    |
+    v
+COMPENSATE RISK
+    |
+    v
+COMPENSATE DEBIT
+    |
+    v
+COMPENSATED
+```
+
+IMPORTANTE:
+
+Nunca se debe compensar una operación que no haya sido ejecutada.
+
+============================================================
+11. COREOGRAFÍA
+===============
+
+En el patrón Saga Choreography NO existe un orquestador central
+controlando directamente cada servicio.
+
+Los servicios se comunican mediante eventos.
+
+Eventos principales:
+
+```
+TransferRequested
+BalanceDebited
+RiskApproved
+RiskRejected
+ClearingRequested
+TransferCompleted
+TransferFailed
+DebitCompensationRequested
+RiskCompensationRequested
+DebitCompensated
+RiskCompensated
+```
+
+Ejemplo de flujo exitoso:
+
+```
+TransferRequested
+        |
+        v
+BalanceDebited
+        |
+        v
+RiskApproved
+        |
+        v
+ClearingRequested
+        |
+        v
+TransferCompleted
+```
+
+Ejemplo de fallo:
+
+```
+TransferRequested
+        |
+        v
+BalanceDebited
+        |
+        v
+RiskRejected
+        |
+        v
+DebitCompensationRequested
+        |
+        v
+DebitCompensated
+```
+
+============================================================
+12. FORMATO DE EVENTOS
+======================
+
+Todos los eventos deben utilizar el siguiente formato:
+
+{
+"event_id": "uuid",
+"event_type": "BalanceDebited",
+"transfer_id": "uuid",
+"timestamp": "2026-09-12T15:30:00Z",
+"payload": {
+"account_id": "ACC-001",
+"amount": 500000
+}
+}
+
+Campos:
+
+```
+event_id
+    UUID único del evento.
+
+event_type
+    Nombre del evento.
+
+transfer_id
+    UUID de la Saga asociada.
+
+timestamp
+    Fecha y hora de generación.
+
+payload
+    Datos específicos del evento.
+```
+
+============================================================
+13. REGLAS DE COMPENSACIÓN
+==========================
+
+Las compensaciones deben ejecutarse en orden inverso al flujo normal.
+
+Ejemplo:
+
+```
+1. Debit
+2. Risk
+3. Clearing
+4. Credit
+```
+
+Si Credit falla después de que Clearing, Risk y Debit ocurrieron:
+
+```
+1. Compensar Clearing
+2. Compensar Risk
+3. Compensar Debit
+```
+
+No se debe compensar una operación que nunca fue ejecutada.
+
+Las compensaciones deben ser idempotentes.
+
+Si una compensación se recibe dos veces con el mismo transfer_id,
+no debe devolver dinero dos veces.
+
+============================================================
+14. CHAOS / FALLURE FLAGS
+=========================
+
+El sistema debe permitir simular errores.
+
+Flags obligatorios:
+
+```
+force_risk_failure
+force_clearing_timeout
+```
+
+Ejemplo:
+
+{
+"source_account_id": "ACC-001",
+"destination_account_id": "ACC-002",
+"amount": 500000,
+"force_risk_failure": true,
+"force_clearing_timeout": false
+}
+
+El Frontend utilizará estos campos para demostrar los escenarios
+de fallo durante la presentación.
+
+============================================================
+15. PRUEBAS OBLIGATORIAS
+========================
+
+CP-01 — TRANSFERENCIA EXITOSA
+
+Entrada:
+
+```
+Cuenta origen con fondos suficientes.
+Riesgo aprobado.
+Clearing exitoso.
+```
+
+Resultado esperado:
+
+```
+- Débito correcto.
+- Riesgo aprobado.
+- Clearing exitoso.
+- Cuenta destino acreditada.
+- Estado final:
+
+    COMPLETED
+```
+
+En la documentación/demo puede mostrarse como:
+
+```
+CONFIRMADO
+```
+
+---
+
+## CP-02 — FONDOS INSUFICIENTES
+
+Entrada:
+
+```
+Cuenta origen sin fondos suficientes.
+```
+
+Resultado esperado:
+
+```
+- El débito falla.
+- No se ejecuta Risk.
+- No se ejecuta Clearing.
+- No se ejecuta compensación.
+- Las cuentas permanecen sin cambios.
+```
+
+Estado:
+
+```
+REJECTED_FUNDS
+```
+
+---
+
+## CP-03 — FALLA DE RIESGO
+
+Entrada:
+
+```
+force_risk_failure = true
+```
+
+Flujo:
+
+```
+1. Débito exitoso.
+2. Risk rechaza.
+3. Saga inicia compensación.
+4. Se revierte el débito.
+```
+
+Resultado:
+
+```
+El saldo de la cuenta origen debe quedar exactamente igual
+al saldo anterior a la transferencia.
+```
+
+Estado:
+
+```
+REJECTED_RISK
+```
+
+Debe quedar registro de la compensación.
+
+---
+
+## CP-04 — TIMEOUT DE CLEARING
+
+Entrada:
+
+```
+force_clearing_timeout = true
+```
+
+Flujo:
+
+```
+1. Débito exitoso.
+2. Riesgo aprobado.
+3. Clearing falla/expira.
+4. Se inicia compensación.
+5. Se cancela la aprobación de riesgo.
+6. Se revierte el débito.
+```
+
+Resultado:
+
+```
+Los balances deben quedar intactos respecto al estado inicial.
+```
+
+Estado:
+
+```
+REJECTED_NETWORK
+```
+
+Debe existir registro/auditoría del fallo y de las compensaciones.
+
+---
+
+## CP-05 — IDEMPOTENCIA
+
+Entrada:
+
+```
+Se envía la misma transferencia varias veces utilizando
+el mismo Idempotency-Key.
+```
+
+Resultado:
+
+```
+- Solo se ejecuta una operación real.
+- No se realiza doble débito.
+- No se realiza doble crédito.
+- Los reintentos devuelven el resultado original.
+```
+
+Objetivo:
+
+```
+Demostrar que los reintentos no generan cobros duplicados.
+```
+
+============================================================
+16. BASE DE DATOS
+=================
+
+La base de datos utilizada será:
+
+```
+Supabase PostgreSQL
+```
+
+Cada servicio debe mantener aislamiento lógico de sus datos.
+
+Account Service:
+
+```
+Datos de cuentas.
+Saldos.
+Movimientos.
+Débitos.
+Créditos.
+Compensaciones.
+```
+
+Risk Service:
+
+```
+Evaluaciones de riesgo.
+Decisiones.
+Límites.
+Compensaciones de riesgo.
+```
+
+Clearing Service:
+
+```
+Operaciones interbancarias.
+Estados de clearing.
+Timeouts.
+Compensaciones.
+```
+
+No se debe permitir que un microservicio modifique directamente
+las tablas pertenecientes a otro microservicio.
+
+La comunicación entre servicios debe realizarse mediante sus APIs
+o mediante eventos.
+
+============================================================
+17. VARIABLES DE ENTORNO
+========================
+
+Las credenciales y configuraciones sensibles deben mantenerse
+en variables de entorno.
+
+Ejemplo:
+
+```
+SUPABASE_URL=...
+SUPABASE_DB_URL=...
+SUPABASE_KEY=...
+```
+
+No se deben subir credenciales al repositorio GitHub.
+
+Debe existir:
+
+```
+.env
+```
+
+Y este archivo debe estar incluido en:
+
+```
+.gitignore
+```
+
+Se recomienda proporcionar:
+
+```
+.env.example
+```
+
+con valores de ejemplo.
+
+============================================================
+18. DOCKER
+==========
+
+Todos los servicios principales deben poder ejecutarse localmente
+mediante Docker Compose.
+
+Comando principal:
+
+```
+docker compose up --build
+```
+
+Servicios esperados:
+
+```
+frontend
+api-gateway
+account-service
+risk-service
+clearing-service
+saga/orchestrator
+message-broker
+observability/prefect
+```
+
+Puertos definidos:
+
+```
+Frontend          3000
+API Gateway       8000
+Account Service   8001
+Risk Service      8002
+Clearing Service  8003
+```
+
+============================================================
+19. OBSERVABILIDAD
+==================
+
+La aplicación debe permitir visualizar el flujo completo de una Saga.
+
+Debe ser posible identificar:
+
+```
+- transfer_id
+- servicio ejecutado
+- operación ejecutada
+- timestamp
+- estado
+- error
+- compensación
+- resultado final
+```
+
+Los servicios deben incluir delays configurables de aproximadamente
+2 a 4 segundos para que el flujo pueda observarse durante la demo.
+
+Ejemplo:
+
+```
+Account
+    |
+    | 3 segundos
+    v
+Risk
+    |
+    | 2 segundos
+    v
+Clearing
+    |
+    | 4 segundos
+    v
+Completed
+```
+
+============================================================
+20. LOGS
+========
+
+Cada operación debe generar logs suficientes para reconstruir
+el flujo de una transferencia.
+
+Ejemplo:
+
+```
+transfer_id=UUID
+service=account-service
+operation=debit
+status=success
+```
+
+Ejemplo de fallo:
+
+```
+transfer_id=UUID
+service=risk-service
+operation=risk_check
+status=failed
+error=RISK_REJECTED
+```
+
+Ejemplo de compensación:
+
+```
+transfer_id=UUID
+service=account-service
+operation=debit_compensation
+status=success
+```
+
+============================================================
+21. ESTRUCTURA DEL PROYECTO
+===========================
+
+saga-bancaria/
+
+```
+api-gateway/
+    app/
+        main.py
+        routes/
+        schemas/
+        services/
+    Dockerfile
+    requirements.txt
+
+account-service/
+    app/
+        main.py
+        models/
+        schemas/
+        routes/
+        services/
+        database.py
+    Dockerfile
+    requirements.txt
+
+risk-service/
+    app/
+        main.py
+        models/
+        schemas/
+        routes/
+        services/
+    Dockerfile
+    requirements.txt
+
+clearing-service/
+    app/
+        main.py
+        models/
+        schemas/
+        routes/
+        services/
+    Dockerfile
+    requirements.txt
+
+docker-compose.yml
+.env
+.env.example
+.gitignore
+README.md
+```
+
+La estructura puede modificarse si el equipo encuentra una mejor
+organización, pero las responsabilidades de cada servicio deben
+mantenerse.
+
+============================================================
+22. RESPONSABILIDADES DEL EQUIPO
+================================
+
+PERSONA 1 — BACKEND Y MICROSERVICIOS
+
+Responsabilidades:
+
+```
+- API Gateway.
+- Account & Ledger Service.
+- Risk/Fraud Service.
+- Clearing Gateway Service.
+- Modelos de datos.
+- Integración con Supabase.
+- Endpoints.
+- Idempotencia.
+- Operaciones normales.
+- Endpoints de compensación.
+- Dockerización de servicios.
+- Tests de endpoints.
+```
+
+PERSONA 2 — SAGA Y ARQUITECTURA DISTRIBUIDA
+
+Responsabilidades:
+
+```
+- Saga Orchestration.
+- Saga Choreography.
+- Message Broker/Event Bus.
+- Eventos.
+- Flujo de compensación.
+- Retries.
+- Timeouts.
+- Consistencia eventual.
+- BASE.
+- Integración con los endpoints de Persona 1.
+```
+
+PERSONA 3 — FRONTEND, OBSERVABILIDAD Y TESTING
+
+Responsabilidades:
+
+```
+- Frontend.
+- Simulador de caos.
+- Switches de errores.
+- Visualización del flujo.
+- Estados de la Saga.
+- Logs/auditoría.
+- Integración con Prefect u otra herramienta.
+- Pruebas CP-01 a CP-05.
+- Video de demostración.
+```
+
+============================================================
+23. FLUJO GENERAL COMPLETO
+==========================
+
+TRANSFERENCIA EXITOSA:
+
+```
+Frontend
+    |
+    v
+API Gateway
+    |
+    v
+Account Service
+    |
+    | debit
+    v
+Risk Service
+    |
+    | approve
+    v
+Clearing Service
+    |
+    | success
+    v
+Account Service
+    |
+    | credit
+    v
+COMPLETED
+```
+
+FALLA DE RIESGO:
+
+```
+Frontend
+    |
+    v
+API Gateway
+    |
+    v
+Account Service
+    |
+    | debit OK
+    v
+Risk Service
+    |
+    | REJECT
+    v
+Compensation
+    |
+    v
+Account Service
+    |
+    | reverse debit
+    v
+COMPENSATED
+```
+
+FALLA DE CLEARING:
+
+```
+Frontend
+    |
+    v
+API Gateway
+    |
+    v
+Account Service
+    |
+    | debit OK
+    v
+Risk Service
+    |
+    | approve
+    v
+Clearing Service
+    |
+    | TIMEOUT
+    v
+Compensation
+    |
+    +--> Risk Compensation
+    |
+    +--> Debit Compensation
+    |
+    v
+COMPENSATED
+```
+
+============================================================
+24. REGLAS DE INTEGRACIÓN DEL EQUIPO
+====================================
+
+Una vez aprobado este contrato:
+
+```
+1. No cambiar unilateralmente endpoints.
+2. No cambiar nombres de campos.
+3. No cambiar estados.
+4. No cambiar eventos.
+5. No cambiar formatos JSON.
+6. No modificar puertos sin avisar.
+7. No modificar responsabilidades de un servicio sin acordarlo.
+```
+
+Si es necesario realizar un cambio:
+
+```
+1. Se informa al equipo.
+2. Se actualiza este contrato.
+3. Se actualiza el código.
+4. Se actualizan las pruebas.
+5. Se verifica la integración completa.
+```
+
+============================================================
+25. DEFINITION OF DONE
+======================
+
+Una funcionalidad se considera terminada cuando:
+
+```
+[ ] El endpoint funciona.
+[ ] La respuesta cumple el contrato.
+[ ] La operación es idempotente cuando corresponde.
+[ ] Los errores tienen formato estándar.
+[ ] Existe registro/log.
+[ ] La operación puede ser compensada si corresponde.
+[ ] Existe prueba.
+[ ] Funciona dentro de Docker.
+[ ] No rompe los contratos existentes.
+[ ] Está documentada en README.
+```
+
+============================================================
+26. REPOSITORIO Y EJECUCIÓN
+===========================
+
+El repositorio debe contener:
+
+```
+- Código fuente.
+- Dockerfiles.
+- docker-compose.yml.
+- README.md.
+- .env.example.
+- Pruebas.
+- Documentación de endpoints.
+- Instrucciones de ejecución.
+```
+
+Ejecución esperada:
+
+```
+git clone <repository>
+
+cd saga-bancaria
+
+cp .env.example .env
+
+docker compose up --build
+```
+
+============================================================
+27. REGLA PRINCIPAL DE LA SAGA
+==============================
+
+La regla más importante del sistema es:
+
+```
+"Toda operación que haya sido ejecutada correctamente y que
+ posteriormente deba ser revertida debe tener una operación
+ de compensación explícita."
+```
+
+Nunca se debe asumir que una transacción distribuida puede simplemente
+hacer rollback de todos los servicios.
+
+Cada servicio realiza su propia transacción local y proporciona
+su mecanismo de compensación.
+
+La Saga coordina estas operaciones para lograr consistencia eventual.
+
+============================================================
+FIN DEL CONTRATO
+================
+======================================================================
+CONTRATO DE INTEGRACIÓN — API GATEWAY
+Versión 1.0.0
+======================================================================
+
+Base URL local: http://localhost:8000
+Formato: JSON. Fechas: ISO 8601 en UTC.
+
+POST /api/v1/transfers
+----------------------
+
+Header opcional:
+
+    Idempotency-Key: <UUID>
+
+Si no se envía, el gateway genera el UUID y lo devuelve en el header de
+respuesta. Reenviar el mismo cuerpo con la misma clave devuelve HTTP 200
+con la transferencia original. Reutilizarla con datos distintos devuelve
+HTTP 409 y no crea una nueva operación.
+
+Request:
+
+{
+  "source_account_id": "ACC-001",
+  "destination_account_id": "ACC-002",
+  "amount": "150000.00",
+  "currency": "COP",
+  "chaos": {
+    "force_risk_failure": false,
+    "force_clearing_timeout": false
+  }
+}
+
+Respuesta inicial (HTTP 201):
+
+{
+  "transfer_id": "UUID",
+  "idempotency_key": "UUID",
+  "status": "RECIBIDA",
+  "source_account_id": "ACC-001",
+  "destination_account_id": "ACC-002",
+  "amount": "150000.00",
+  "currency": "COP",
+  "chaos": {
+    "force_risk_failure": false,
+    "force_clearing_timeout": false
+  },
+  "created_at": "2026-01-01T00:00:00Z",
+  "updated_at": "2026-01-01T00:00:00Z",
+  "replayed": false
+}
+
+Estados reservados para la Saga:
+
+    RECIBIDA | EN_PROCESO | CONFIRMADA | RECHAZADA_FONDOS |
+    RECHAZADA_RIESGO | RECHAZADA_RED | COMPENSANDO | COMPENSADA | FALLIDA
+
+GET /api/v1/transfers/{transfer_id}
+-------------------------------------
+
+Consulta una transferencia. Responde HTTP 200 o HTTP 404 si no existe.
+
+GET /api/v1/transfers
+---------------------
+
+Lista las transferencias registradas por la instancia del Gateway.
+
+GET /health
+GET /api/v1/dependencies/health
+--------------------------------
+
+El primer endpoint verifica el Gateway. El segundo consulta /health en
+Account, Risk y Clearing y reporta UP o DEGRADED sin modificar operaciones.
+
+NOTA DE INTEGRACIÓN
+-------------------
+
+El Gateway fija el contrato de entrada e idempotencia antes del primer
+débito. La implementación de la Saga debe consumir transfer_id y los
+switches chaos, sin modificar rutas o nombres de campos sin acuerdo del
+equipo.
