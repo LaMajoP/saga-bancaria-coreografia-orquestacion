@@ -40,6 +40,13 @@ class TransferRequest(BaseModel):
     def normalize_currency(cls, value: str) -> str:
         return value.upper()
 
+    @field_validator("amount")
+    @classmethod
+    def amount_must_be_whole_cop_pesos(cls, value: Decimal) -> Decimal:
+        if value != value.to_integral_value():
+            raise ValueError("amount must be a whole number of COP pesos")
+        return value
+
     @model_validator(mode="after")
     def accounts_must_differ(self) -> "TransferRequest":
         if self.source_account_id == self.destination_account_id:

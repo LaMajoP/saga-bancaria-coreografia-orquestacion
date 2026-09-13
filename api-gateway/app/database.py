@@ -1,4 +1,4 @@
-"""PostgreSQL access owned exclusively by Account & Ledger Service."""
+"""PostgreSQL access owned exclusively by the API Gateway."""
 
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -11,13 +11,11 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 
 
-class AccountRepository:
-    """Owns transactions against the remote ``account`` schema in Supabase."""
-
+class GatewayDatabase:
     def __init__(self, database_url: str | None = None) -> None:
-        raw_database_url = database_url or os.getenv("ACCOUNT_DATABASE_URL")
+        raw_database_url = database_url or os.getenv("GATEWAY_DATABASE_URL")
         if not raw_database_url:
-            raise RuntimeError("ACCOUNT_DATABASE_URL must be configured")
+            raise RuntimeError("GATEWAY_DATABASE_URL must be configured")
         self.database_url = self._normalize_database_url(raw_database_url)
 
     @staticmethod
@@ -50,7 +48,7 @@ class AccountRepository:
     def initialize(self) -> None:
         """Fail fast when the Supabase migration has not been applied."""
         with self._connect() as connection:
-            connection.execute("SELECT 1 FROM account.accounts LIMIT 1")
+            connection.execute("SELECT 1 FROM gateway.transfers LIMIT 1")
 
     @contextmanager
     def transaction(self) -> Iterator[Connection[Any]]:

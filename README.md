@@ -1,6 +1,8 @@
 # Saga bancaria
 
 Esqueleto inicial de una arquitectura de microservicios para una saga bancaria.
+Los servicios se ejecutan localmente, mientras que la persistencia se realiza
+en Supabase PostgreSQL mediante variables de entorno incluidas en `.env`.
 
 ## Servicios
 

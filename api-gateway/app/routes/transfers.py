@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Header, HTTPException, Response, status
 
 from app.schemas.transfers import TransferListResponse, TransferRequest, TransferResponse
-from app.services.transfer_registry import IdempotencyConflictError, transfer_registry
+from app.services.transfer_repository import IdempotencyConflictError, transfer_repository
 
 router = APIRouter(prefix="/api/v1/transfers", tags=["transfers"])
 
@@ -29,7 +29,7 @@ def create_transfer(
             ) from error
 
     try:
-        record, replayed = transfer_registry.create_or_retrieve(request, key)
+        record, replayed = transfer_repository.create_or_retrieve(request, key)
     except IdempotencyConflictError as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
 
@@ -41,12 +41,12 @@ def create_transfer(
 
 @router.get("", response_model=TransferListResponse)
 def list_transfers() -> TransferListResponse:
-    return TransferListResponse(transfers=[record.response() for record in transfer_registry.list()])
+    return TransferListResponse(transfers=[record.response() for record in transfer_repository.list()])
 
 
 @router.get("/{transfer_id}", response_model=TransferResponse)
 def get_transfer(transfer_id: UUID) -> TransferResponse:
-    record = transfer_registry.get(str(transfer_id))
+    record = transfer_repository.get(str(transfer_id))
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transfer not found")
     return record.response()

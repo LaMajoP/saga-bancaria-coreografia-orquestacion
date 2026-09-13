@@ -221,47 +221,98 @@ Puerto:
 Endpoint principal:
 
 ```
-POST /transfers
+POST /api/v1/transfers
 ```
 
-Request:
+El contrato canónico de request, response, Idempotency-Key y estados se
+encuentra en el anexo "CONTRATO DE INTEGRACIÓN — API GATEWAY" al final de
+este documento. El API Gateway es el punto de entrada principal para el
+Frontend.
 
+---
+
+## 6.1 ENTREGA DE UNA TRANSFERENCIA A LA SAGA
+
+El Gateway crea y conserva el registro público de la transferencia, pero
+NO ejecuta directamente debit, risk, clearing ni credit. Después de crear
+una transferencia con éxito, debe entregarla a la implementación de Saga
+seleccionada. Persona 2 es responsable de consumir esta entrega y de
+coordinar las operaciones locales de los microservicios.
+
+Datos que el Gateway entrega sin modificarlos:
+
+```json
 {
-"source_account_id": "ACC-001",
-"destination_account_id": "ACC-002",
-"amount": 500000,
-"force_risk_failure": false,
-"force_clearing_timeout": false
+  "transfer_id": "uuid",
+  "source_account_id": "ACC-001",
+  "destination_account_id": "ACC-002",
+  "amount": 500000,
+  "currency": "COP",
+  "chaos": {
+    "force_risk_failure": false,
+    "force_clearing_timeout": false
+  }
 }
-
-Campos:
-
-```
-source_account_id
-    Cuenta que envía el dinero.
-
-destination_account_id
-    Cuenta que recibe el dinero.
-
-amount
-    Valor de la transferencia.
-
-force_risk_failure
-    Fuerza un rechazo del servicio de riesgo para pruebas.
-
-force_clearing_timeout
-    Fuerza un timeout del servicio de clearing para pruebas.
 ```
 
-Respuesta:
+El valor de `transfer_id` es el identificador de correlación obligatorio
+en todas las llamadas y eventos de la Saga. Para COP, `amount` se expresa
+como entero en pesos, sin decimales, en Gateway, Saga y Account Service.
 
+### Opción A: Saga Orchestration
+
+Cuando se active el modo de orquestación, Persona 2 expone:
+
+```
+POST ${SAGA_ORCHESTRATOR_URL}/api/v1/sagas/transfers
+```
+
+El Gateway usa esa URL configurable para enviar el cuerpo anterior. El
+orquestador responde `202 Accepted` después de aceptar la transferencia:
+
+```json
 {
-"success": true,
-"transfer_id": "uuid",
-"status": "PENDING"
+  "transfer_id": "uuid",
+  "status": "EN_PROCESO"
 }
+```
 
-El API Gateway es el punto de entrada principal para el Frontend.
+### Opción B: Saga Choreography
+
+Cuando se active el modo de coreografía, el Gateway publica en el broker el
+evento `TransferRequested`, usando el formato de eventos de la sección 12.
+El `payload` del evento es exactamente el cuerpo anterior. Persona 2 define
+la configuración concreta del broker y garantiza que los consumidores usen
+`transfer_id` para evitar procesamientos duplicados.
+
+### Actualización del estado público
+
+La respuesta inicial del Gateway sigue siendo una aceptación asíncrona
+(`RECIBIDA`). La Saga es quien determina el resultado posterior y debe
+informarlo al Gateway mediante uno de estos mecanismos acordados antes de
+integrar:
+
+```
+1. endpoint interno autenticado de actualización de estado, o
+2. evento TransferStatusChanged consumido por el Gateway.
+```
+
+El mensaje de actualización contiene, como mínimo:
+
+```json
+{
+  "transfer_id": "uuid",
+  "status": "EN_PROCESO | CONFIRMADA | RECHAZADA_FONDOS | RECHAZADA_RIESGO | RECHAZADA_RED | COMPENSANDO | COMPENSADA | FALLIDA",
+  "error_code": null,
+  "message": null,
+  "updated_at": "2026-09-12T15:30:00Z"
+}
+```
+
+El equipo debe escoger una sola opción de entrega y una sola opción de
+actualización antes de implementar la integración. No se cambian la ruta
+pública, los nombres de campos ni el `transfer_id` definidos por el
+Gateway.
 
 ============================================================
 7. ACCOUNT & LEDGER SERVICE
@@ -324,6 +375,7 @@ Respuesta exitosa:
 "transfer_id": "uuid",
 "account_id": "ACC-001",
 "amount": 500000,
+"new_balance": 1000000,
 "status": "DEBITED"
 }
 
@@ -362,6 +414,7 @@ Respuesta:
 "transfer_id": "uuid",
 "account_id": "ACC-002",
 "amount": 500000,
+"new_balance": 1500000,
 "status": "COMPLETED"
 }
 

@@ -4,7 +4,13 @@ from uuid import uuid4
 import httpx
 import pytest
 
-os.environ["ACCOUNT_DB_PATH"] = f"/tmp/account-service-tests-{uuid4()}.db"
+test_database_url = os.getenv("TEST_ACCOUNT_DATABASE_URL")
+if not test_database_url:
+    pytest.skip(
+        "TEST_ACCOUNT_DATABASE_URL is required; tests only run against remote Supabase test data",
+        allow_module_level=True,
+    )
+os.environ["ACCOUNT_DATABASE_URL"] = test_database_url
 
 from app.main import app
 
@@ -29,7 +35,9 @@ async def test_debit_is_idempotent_and_can_be_compensated() -> None:
 
         assert debit.status_code == 200
         assert debit.json()["status"] == "DEBITED"
+        assert debit.json()["new_balance"] == initial - 500_000
         assert repeated.status_code == 200
+        assert repeated.json()["new_balance"] == initial - 500_000
         assert (await client.get("/accounts/ACC-001")).json()["balance"] == initial - 500_000
 
         compensated = await client.post(
@@ -40,7 +48,9 @@ async def test_debit_is_idempotent_and_can_be_compensated() -> None:
         )
 
         assert compensated.json()["status"] == "COMPENSATED"
+        assert compensated.json()["new_balance"] == initial
         assert repeated_compensation.status_code == 200
+        assert repeated_compensation.json()["new_balance"] == initial
         assert (await client.get("/accounts/ACC-001")).json()["balance"] == initial
 
 
@@ -59,6 +69,34 @@ async def test_insufficient_funds_does_not_create_a_debit() -> None:
         assert response.json()["status"] == "REJECTED_FUNDS"
         assert response.json()["error_code"] == "INSUFFICIENT_FUNDS"
         assert (await client.get("/accounts/ACC-003")).json()["balance"] == initial
+
+
+@pytest.mark.anyio
+async def test_credit_returns_the_resulting_balance_and_is_idempotent() -> None:
+    transfer_id = str(uuid4())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        initial = (await client.get("/accounts/ACC-002")).json()["balance"]
+        credit = await client.post(
+            "/accounts/ACC-002/credit", json=request_body(transfer_id, 500_000)
+        )
+        repeated = await client.post(
+            "/accounts/ACC-002/credit", json=request_body(transfer_id, 500_000)
+        )
+
+        assert credit.status_code == 200
+        assert credit.json()["status"] == "COMPLETED"
+        assert credit.json()["new_balance"] == initial + 500_000
+        assert repeated.status_code == 200
+        assert repeated.json()["new_balance"] == initial + 500_000
+        assert (await client.get("/accounts/ACC-002")).json()["balance"] == initial + 500_000
+
+        compensated = await client.post(
+            "/accounts/ACC-002/credit/compensate", json=request_body(transfer_id, 500_000)
+        )
+        assert compensated.status_code == 200
+        assert compensated.json()["new_balance"] == initial
 
 
 @pytest.mark.anyio

@@ -1,6 +1,16 @@
+import os
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
+
+test_database_url = os.getenv("TEST_GATEWAY_DATABASE_URL")
+if not test_database_url:
+    pytest.skip(
+        "TEST_GATEWAY_DATABASE_URL is required; tests only run against remote Supabase test data",
+        allow_module_level=True,
+    )
+os.environ["GATEWAY_DATABASE_URL"] = test_database_url
 
 from app.main import app
 

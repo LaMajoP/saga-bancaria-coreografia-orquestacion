@@ -24,6 +24,7 @@ class OperationResponse(BaseModel):
     transfer_id: UUID
     account_id: str
     amount: int
+    new_balance: int
     status: str
 
 

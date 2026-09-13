@@ -7,6 +7,7 @@ services:
       ACCOUNT_SERVICE_URL: http://account-service:8000
       RISK_SERVICE_URL: http://risk-service:8000
       CLEARING_SERVICE_URL: http://clearing-service:8000
+      GATEWAY_DATABASE_URL: ${GATEWAY_DATABASE_URL:?GATEWAY_DATABASE_URL is required}
     depends_on:
       - account-service
       - risk-service
@@ -17,19 +18,21 @@ services:
     ports:
       - "${ACCOUNT_SERVICE_PORT:-8001}:8000"
     environment:
-      ACCOUNT_DB_PATH: /data/accounts.db
-    volumes:
-      - account_service_data:/data
+      ACCOUNT_DATABASE_URL: ${ACCOUNT_DATABASE_URL:?ACCOUNT_DATABASE_URL is required}
 
   risk-service:
     build: ./risk-service
     ports:
       - "${RISK_SERVICE_PORT:-8002}:8000"
+    environment:
+      RISK_DATABASE_URL: ${RISK_DATABASE_URL:?RISK_DATABASE_URL is required}
+      RISK_MAX_AMOUNT: ${RISK_MAX_AMOUNT:-1000000}
 
   clearing-service:
     build: ./clearing-service
     ports:
       - "${CLEARING_SERVICE_PORT:-8003}:8000"
-
-volumes:
-  account_service_data:
+    environment:
+      CLEARING_DATABASE_URL: ${CLEARING_DATABASE_URL:?CLEARING_DATABASE_URL is required}
+      CLEARING_LATENCY_SECONDS: ${CLEARING_LATENCY_SECONDS:-0}
+      CLEARING_TIMEOUT_SECONDS: ${CLEARING_TIMEOUT_SECONDS:-3}

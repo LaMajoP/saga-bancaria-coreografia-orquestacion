@@ -5,8 +5,10 @@ from app.core.config import get_settings
 from app.routes.dependencies import router as dependencies_router
 from app.routes.health import router as health_router
 from app.routes.transfers import router as transfers_router
+from app.services.transfer_repository import transfer_repository
 
 settings = get_settings()
+transfer_repository.initialize()
 
 app = FastAPI(
     title="NovaBank API Gateway",

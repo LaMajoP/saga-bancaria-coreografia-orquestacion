@@ -1,9 +1,11 @@
-"""Local, idempotent account operations and their compensations."""
+"""Idempotent local account operations persisted in Supabase PostgreSQL."""
 
 from dataclasses import dataclass
 import logging
-import sqlite3
+from typing import Any
 from uuid import uuid4
+
+from psycopg import Connection
 
 from app.database import AccountRepository
 from app.schemas.accounts import AccountResponse, OperationResponse
@@ -34,6 +36,7 @@ class _LedgerResult:
     transfer_id: str
     account_id: str
     amount: int
+    new_balance: int
     status: str
 
     def response(self) -> OperationResponse:
@@ -41,6 +44,7 @@ class _LedgerResult:
             transfer_id=self.transfer_id,
             account_id=self.account_id,
             amount=self.amount,
+            new_balance=self.new_balance,
             status=self.status,
         )
 
@@ -53,9 +57,17 @@ class AccountService:
         self.repository.initialize()
 
     @staticmethod
-    def _account(connection: sqlite3.Connection, account_id: str) -> sqlite3.Row:
+    def _account(
+        connection: Connection[Any], account_id: str, *, lock: bool = False
+    ) -> dict[str, Any]:
+        lock_clause = " FOR UPDATE" if lock else ""
         account = connection.execute(
-            "SELECT account_id, balance, currency FROM accounts WHERE account_id = ?", (account_id,)
+            f"""
+            SELECT account_id, balance, currency
+            FROM account.accounts
+            WHERE account_id = %s{lock_clause}
+            """,
+            (account_id,),
         ).fetchone()
         if account is None:
             raise AccountServiceError(
@@ -69,19 +81,19 @@ class AccountService:
 
     @staticmethod
     def _existing_operation(
-        connection: sqlite3.Connection, transfer_id: str, account_id: str, operation: str
-    ) -> sqlite3.Row | None:
+        connection: Connection[Any], transfer_id: str, account_id: str, operation: str
+    ) -> dict[str, Any] | None:
         return connection.execute(
             """
-            SELECT transfer_id, account_id, amount, status
-            FROM ledger_entries
-            WHERE transfer_id = ? AND account_id = ? AND operation = ?
+            SELECT transfer_id, account_id, amount, balance_after, status
+            FROM account.ledger_entries
+            WHERE transfer_id = %s AND account_id = %s AND operation = %s
             """,
             (transfer_id, account_id, operation),
         ).fetchone()
 
     @staticmethod
-    def _assert_same_amount(existing: sqlite3.Row, amount: int, transfer_id: str) -> None:
+    def _assert_same_amount(existing: dict[str, Any], amount: int, transfer_id: str) -> None:
         if existing["amount"] != amount:
             raise AccountServiceError(
                 transfer_id=transfer_id,
@@ -116,11 +128,19 @@ class AccountService:
         direction: int,
     ) -> OperationResponse:
         with self.repository.transaction() as connection:
-            account = self._account(connection, account_id)
+            # Lock before reading the ledger. A concurrent retry waits here and
+            # then observes the operation already committed by the first request.
+            account = self._account(connection, account_id, lock=True)
             existing = self._existing_operation(connection, transfer_id, account_id, operation)
             if existing is not None:
                 self._assert_same_amount(existing, amount, transfer_id)
-                return _LedgerResult(**dict(existing)).response()
+                return _LedgerResult(
+                    transfer_id=str(existing["transfer_id"]),
+                    account_id=existing["account_id"],
+                    amount=existing["amount"],
+                    new_balance=existing["balance_after"],
+                    status=existing["status"],
+                ).response()
 
             if direction < 0 and account["balance"] < amount:
                 raise AccountServiceError(
@@ -131,17 +151,31 @@ class AccountService:
                     http_status=409,
                 )
 
+            new_balance = account["balance"] + direction * amount
             connection.execute(
-                "UPDATE accounts SET balance = balance + ? WHERE account_id = ?",
-                (direction * amount, account_id),
+                """
+                UPDATE account.accounts
+                SET balance = %s, updated_at = now()
+                WHERE account_id = %s
+                """,
+                (new_balance, account_id),
             )
             connection.execute(
                 """
-                INSERT INTO ledger_entries
-                    (operation_id, transfer_id, account_id, operation, amount, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO account.ledger_entries (
+                    operation_id, transfer_id, account_id, operation, amount,
+                    balance_after, status, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, now())
                 """,
-                (str(uuid4()), transfer_id, account_id, operation, amount, status, self.repository.now()),
+                (
+                    str(uuid4()),
+                    transfer_id,
+                    account_id,
+                    operation,
+                    amount,
+                    new_balance,
+                    status,
+                ),
             )
 
         logger.info(
@@ -150,7 +184,7 @@ class AccountService:
             operation,
             status,
         )
-        return _LedgerResult(transfer_id, account_id, amount, status).response()
+        return _LedgerResult(transfer_id, account_id, amount, new_balance, status).response()
 
     def compensate_debit(
         self, account_id: str, transfer_id: str, amount: int
@@ -176,13 +210,19 @@ class AccountService:
     ) -> OperationResponse:
         compensation_operation = f"{original_operation}_compensate"
         with self.repository.transaction() as connection:
-            account = self._account(connection, account_id)
+            account = self._account(connection, account_id, lock=True)
             existing_compensation = self._existing_operation(
                 connection, transfer_id, account_id, compensation_operation
             )
             if existing_compensation is not None:
                 self._assert_same_amount(existing_compensation, amount, transfer_id)
-                return _LedgerResult(**dict(existing_compensation)).response()
+                return _LedgerResult(
+                    transfer_id=str(existing_compensation["transfer_id"]),
+                    account_id=existing_compensation["account_id"],
+                    amount=existing_compensation["amount"],
+                    new_balance=existing_compensation["balance_after"],
+                    status=existing_compensation["status"],
+                ).response()
 
             original = self._existing_operation(connection, transfer_id, account_id, original_operation)
             if original is None:
@@ -204,19 +244,29 @@ class AccountService:
                     http_status=409,
                 )
 
+            new_balance = account["balance"] + direction * amount
             connection.execute(
-                "UPDATE accounts SET balance = balance + ? WHERE account_id = ?",
-                (direction * amount, account_id),
+                """
+                UPDATE account.accounts
+                SET balance = %s, updated_at = now()
+                WHERE account_id = %s
+                """,
+                (new_balance, account_id),
             )
             connection.execute(
-                "UPDATE ledger_entries SET compensated = 1 WHERE transfer_id = ? AND account_id = ? AND operation = ?",
+                """
+                UPDATE account.ledger_entries
+                SET compensated = true
+                WHERE transfer_id = %s AND account_id = %s AND operation = %s
+                """,
                 (transfer_id, account_id, original_operation),
             )
             connection.execute(
                 """
-                INSERT INTO ledger_entries
-                    (operation_id, transfer_id, account_id, operation, amount, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO account.ledger_entries (
+                    operation_id, transfer_id, account_id, operation, amount,
+                    balance_after, status, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, now())
                 """,
                 (
                     str(uuid4()),
@@ -224,8 +274,8 @@ class AccountService:
                     account_id,
                     compensation_operation,
                     amount,
+                    new_balance,
                     "COMPENSATED",
-                    self.repository.now(),
                 ),
             )
 
@@ -234,7 +284,7 @@ class AccountService:
             transfer_id,
             compensation_operation,
         )
-        return _LedgerResult(transfer_id, account_id, amount, "COMPENSATED").response()
+        return _LedgerResult(transfer_id, account_id, amount, new_balance, "COMPENSATED").response()
 
 
 account_service = AccountService(AccountRepository())
