@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from psycopg import Connection
+from psycopg.types.json import Json
 
 from app.database import GatewayDatabase
 from app.schemas.transfers import ChaosOptions, TransferRequest, TransferResponse, TransferStatus
@@ -144,6 +145,61 @@ class TransferRepository:
                 "SELECT * FROM gateway.transfers ORDER BY created_at"
             ).fetchall()
             return [self._record_from_row(row) for row in rows]
+
+    def update_status(
+        self,
+        transfer_id: str,
+        status: TransferStatus,
+        error_code: str | None = None,
+        message: str | None = None,
+    ) -> TransferRecord | None:
+        """Apply the outcome reported by the Saga (contract section 6.1)."""
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                """
+                UPDATE gateway.transfers
+                SET status = %s, error_code = %s, message = %s, updated_at = now()
+                WHERE transfer_id = %s
+                RETURNING *
+                """,
+                (status.value, error_code, message, transfer_id),
+            ).fetchone()
+            return self._record_from_row(row) if row is not None else None
+
+    def record_outbox(
+        self, transfer_id: str, saga_mode: str, payload: dict[str, Any]
+    ) -> None:
+        """Keep the hand-over to the Saga durable, so it can be retried."""
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO gateway.transfer_outbox (
+                    transfer_id, saga_mode, event_type, payload, delivery_status, attempt_count
+                ) VALUES (%s, %s, 'TransferRequested', %s, 'PENDING', 1)
+                ON CONFLICT (transfer_id) DO UPDATE SET
+                    saga_mode = EXCLUDED.saga_mode,
+                    payload = EXCLUDED.payload,
+                    delivery_status = 'PENDING',
+                    attempt_count = gateway.transfer_outbox.attempt_count + 1,
+                    last_error = NULL
+                """,
+                (transfer_id, saga_mode, Json(payload)),
+            )
+
+    def mark_outbox(
+        self, transfer_id: str, delivery_status: str, last_error: str | None = None
+    ) -> None:
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE gateway.transfer_outbox
+                SET delivery_status = %s,
+                    last_error = %s,
+                    delivered_at = CASE WHEN %s = 'DELIVERED' THEN now() ELSE delivered_at END
+                WHERE transfer_id = %s
+                """,
+                (delivery_status, last_error, delivery_status, transfer_id),
+            )
 
 
 transfer_repository = TransferRepository(GatewayDatabase())

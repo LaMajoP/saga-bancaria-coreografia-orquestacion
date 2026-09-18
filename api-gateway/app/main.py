@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
 from app.routes.dependencies import router as dependencies_router
 from app.routes.health import router as health_router
+from app.routes.internal import router as internal_router
 from app.routes.transfers import router as transfers_router
 from app.services.transfer_repository import transfer_repository
 
@@ -32,3 +33,4 @@ def root() -> dict[str, str]:
 app.include_router(health_router)
 app.include_router(dependencies_router)
 app.include_router(transfers_router)
+app.include_router(internal_router)

@@ -1,4 +1,36 @@
 services:
+  # ------------------------------------------------------------------ frontend
+  # Interfaz de demostracion y simulador de caos. nginx sirve el build y hace de
+  # proxy: /api/v1/sagas va al saga-service, /accounts al Account Service (solo
+  # lectura, para evidenciar saldos) y el resto al Gateway.
+  frontend:
+    build: ./frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      - api-gateway
+      - saga-service
+      - account-service
+
+  # ---------------------------------------------------------------- mensajeria
+  # Bus de eventos de la Saga Coreografiada. La consola de administracion
+  # (http://localhost:15672, guest/guest) sirve como evidencia visual del
+  # flujo de eventos durante la demostracion.
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ----------------------------------------------------------- punto de entrada
   api-gateway:
     build: ./api-gateway
     ports:
@@ -7,18 +39,25 @@ services:
       ACCOUNT_SERVICE_URL: http://account-service:8000
       RISK_SERVICE_URL: http://risk-service:8000
       CLEARING_SERVICE_URL: http://clearing-service:8000
+      SAGA_SERVICE_URL: http://saga-service:8000
+      SAGA_MODE: ${SAGA_MODE:-ORCHESTRATION}
+      SAGA_INTERNAL_TOKEN: ${SAGA_INTERNAL_TOKEN:?SAGA_INTERNAL_TOKEN is required}
       GATEWAY_DATABASE_URL: ${GATEWAY_DATABASE_URL:?GATEWAY_DATABASE_URL is required}
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-2}
     depends_on:
       - account-service
       - risk-service
       - clearing-service
+      - saga-service
 
+  # ------------------------------------------------- microservicios de dominio
   account-service:
     build: ./account-service
     ports:
       - "${ACCOUNT_SERVICE_PORT:-8001}:8000"
     environment:
       ACCOUNT_DATABASE_URL: ${ACCOUNT_DATABASE_URL:?ACCOUNT_DATABASE_URL is required}
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-2}
 
   risk-service:
     build: ./risk-service
@@ -26,6 +65,7 @@ services:
       - "${RISK_SERVICE_PORT:-8002}:8000"
     environment:
       RISK_DATABASE_URL: ${RISK_DATABASE_URL:?RISK_DATABASE_URL is required}
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-2}
       RISK_MAX_AMOUNT: ${RISK_MAX_AMOUNT:-1000000}
 
   clearing-service:
@@ -34,5 +74,42 @@ services:
       - "${CLEARING_SERVICE_PORT:-8003}:8000"
     environment:
       CLEARING_DATABASE_URL: ${CLEARING_DATABASE_URL:?CLEARING_DATABASE_URL is required}
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-2}
       CLEARING_LATENCY_SECONDS: ${CLEARING_LATENCY_SECONDS:-0}
       CLEARING_TIMEOUT_SECONDS: ${CLEARING_TIMEOUT_SECONDS:-3}
+
+  # ------------------------------------------------------------- capa de Saga
+  # Modalidad 1: orquestacion. Coordinador central implementado como flujo de
+  # Prefect; expone ademas la trazabilidad de cada saga para el frontend.
+  saga-service:
+    build: ./saga-service
+    ports:
+      - "${SAGA_SERVICE_PORT:-8004}:8000"
+    environment: &saga_env
+      SAGA_DATABASE_URL: ${SAGA_DATABASE_URL:?SAGA_DATABASE_URL is required}
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-2}
+      ACCOUNT_SERVICE_URL: http://account-service:8000
+      RISK_SERVICE_URL: http://risk-service:8000
+      CLEARING_SERVICE_URL: http://clearing-service:8000
+      GATEWAY_URL: http://api-gateway:8000
+      SAGA_INTERNAL_TOKEN: ${SAGA_INTERNAL_TOKEN:?SAGA_INTERNAL_TOKEN is required}
+      # Pausa entre micro-pasos para poder observar el avance y la marcha atras.
+      SAGA_STEP_DELAY_SECONDS: ${SAGA_STEP_DELAY_SECONDS:-3}
+      SAGA_USE_PREFECT: ${SAGA_USE_PREFECT:-true}
+      SAGA_NOTIFY_GATEWAY: ${SAGA_NOTIFY_GATEWAY:-true}
+      CLEARING_LATENCY_SECONDS: ${CLEARING_LATENCY_SECONDS:-0}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
+      SAGA_EXCHANGE: ${SAGA_EXCHANGE:-saga.events}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  # Modalidad 2: coreografia. Participantes autonomos que reaccionan a eventos.
+  # Es un proceso aparte a proposito: aqui no hay coordinador que alojar.
+  saga-choreography:
+    build: ./saga-service
+    command: ["python", "worker.py"]
+    environment: *saga_env
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
