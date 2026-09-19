@@ -78,6 +78,27 @@ services:
       CLEARING_LATENCY_SECONDS: ${CLEARING_LATENCY_SECONDS:-0}
       CLEARING_TIMEOUT_SECONDS: ${CLEARING_TIMEOUT_SECONDS:-3}
 
+  # --------------------------------------------------------- motor de flujos
+  # Servidor de Prefect. Su consola (http://localhost:4200) muestra cada saga
+  # como un flow run y cada paso y cada compensacion como una task con nombre
+  # propio, que es la evidencia visual que pide el criterio de observabilidad.
+  prefect-server:
+    image: prefecthq/prefect:3-latest
+    command: ["prefect", "server", "start", "--host", "0.0.0.0"]
+    ports:
+      - "${PREFECT_PORT:-4200}:4200"
+    environment:
+      PREFECT_SERVER_API_HOST: 0.0.0.0
+      PREFECT_UI_API_URL: http://localhost:${PREFECT_PORT:-4200}/api
+    volumes:
+      - prefect-data:/root/.prefect
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 20s
+
   # ------------------------------------------------------------- capa de Saga
   # Modalidad 1: orquestacion. Coordinador central implementado como flujo de
   # Prefect; expone ademas la trazabilidad de cada saga para el frontend.
@@ -96,12 +117,15 @@ services:
       # Pausa entre micro-pasos para poder observar el avance y la marcha atras.
       SAGA_STEP_DELAY_SECONDS: ${SAGA_STEP_DELAY_SECONDS:-3}
       SAGA_USE_PREFECT: ${SAGA_USE_PREFECT:-true}
+      PREFECT_API_URL: http://prefect-server:4200/api
       SAGA_NOTIFY_GATEWAY: ${SAGA_NOTIFY_GATEWAY:-true}
       CLEARING_LATENCY_SECONDS: ${CLEARING_LATENCY_SECONDS:-0}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
       SAGA_EXCHANGE: ${SAGA_EXCHANGE:-saga.events}
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      prefect-server:
         condition: service_healthy
 
   # Modalidad 2: coreografia. Participantes autonomos que reaccionan a eventos.
@@ -113,3 +137,6 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+
+volumes:
+  prefect-data:

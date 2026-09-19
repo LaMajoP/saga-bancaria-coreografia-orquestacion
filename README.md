@@ -41,6 +41,7 @@ flowchart TB
 | `saga-service` | 8004 | Coordinador de la saga orquestada y trazabilidad |
 | `saga-choreography` | — | Participantes autónomos de la saga coreografiada |
 | `rabbitmq` | 5672 / 15672 | Bus de eventos de dominio |
+| `prefect-server` | 4200 | Motor de flujos: cada saga es un flow run y cada paso una task |
 
 ## Puesta en marcha
 
@@ -75,8 +76,9 @@ for p in 8000 8001 8002 8003 8004; do curl -s localhost:$p/health; echo; done
 Interfaces disponibles:
 
 - **Aplicación: `http://localhost:3000`**
+- **Consola de Prefect: `http://localhost:4200`** — flujo de la saga paso a paso
+- Consola de RabbitMQ: `http://localhost:15672` (`guest` / `guest`) — colas y eventos
 - Documentación interactiva de cada servicio: `http://localhost:<puerto>/docs`
-- Consola de RabbitMQ: `http://localhost:15672` (`guest` / `guest`)
 
 ## La interfaz
 
@@ -187,9 +189,11 @@ cd api-gateway && PYTHONPATH=. pytest
   recomendado 2–4) pausa antes de cada paso y de cada compensación, para que el
   avance y la marcha atrás se aprecien durante la demostración. Ponlo en `0`
   para las pruebas automatizadas.
-- **Prefect.** Con `SAGA_USE_PREFECT=true` cada paso y cada compensación es una
-  task con nombre propio: en CP-04 se ven `DEBIT`, `RISK`, `CLEARING`,
-  `compensate-RISK` y `compensate-DEBIT`.
+- **Prefect.** Con `SAGA_USE_PREFECT=true` cada saga se registra en el servidor
+  como un flow run llamado `saga-<transfer_id>`, y cada paso y cada compensación
+  como una task con nombre propio. En CP-04 la consola muestra cinco tasks:
+  `DEBIT`, `RISK`, `CLEARING`, `compensate-RISK` y `compensate-DEBIT` — el orden
+  inverso a la vista. Abre `http://localhost:4200` y entra en *Runs*.
 - **Bitácora de auditoría.** `saga.saga_steps` guarda una fila por paso con
   servicio, operación, estado, código de error y duración. Ordenar por
   `sequence` demuestra que la reversa ocurrió en orden inverso.
@@ -204,6 +208,8 @@ cd api-gateway && PYTHONPATH=. pytest
 |---|---|
 | [docs/01-diseno-saga.md](docs/01-diseno-saga.md) | Máquina de estados, catálogo de eventos, decisiones de arquitectura |
 | [docs/02-orquestacion-vs-coreografia.md](docs/02-orquestacion-vs-coreografia.md) | Comparativa de las dos modalidades con evidencia de las corridas |
+| [docs/03-evidencia-casos-de-prueba.md](docs/03-evidencia-casos-de-prueba.md) | Salida completa de los cinco casos en ambas modalidades |
+| [docs/04-guion-video.md](docs/04-guion-video.md) | Guion minuto a minuto del video demostrativo |
 | [contrato-integracion.txt](contrato-integracion.txt) | Contrato de integración acordado por el equipo |
 
 ## Reparto del trabajo
