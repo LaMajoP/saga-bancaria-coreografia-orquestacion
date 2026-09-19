@@ -118,45 +118,78 @@ export function useTransferPolling(intervalMs = 1500): PollingResult {
   const [steps, setSteps] = useState<SagaStepInfo[]>([]);
   const [isPolling, setIsPolling] = useState(false);
   const [elapsedTotal, setElapsedTotal] = useState(0);
-  const timerRef = useRef<ReturnType<typeof setInterval>>();
+  const timeoutRef = useRef<ReturnType<typeof setTimeout>>();
   const tickRef = useRef<ReturnType<typeof setInterval>>();
   const startTimeRef = useRef<number>(0);
+  const activeRef = useRef(false);
 
   const stop = useCallback(() => {
-    clearInterval(timerRef.current);
+    activeRef.current = false;
+    clearTimeout(timeoutRef.current);
     clearInterval(tickRef.current);
     setIsPolling(false);
   }, []);
 
+  /**
+   * Duracion real de la saga segun el servidor.
+   *
+   * El cronometro del navegador mide desde que se pulsa el boton e incluye la
+   * latencia del sondeo, asi que exagera. Cuando la traza trae sus dos marcas
+   * de tiempo, se usa la diferencia entre ellas: es el numero que coincide con
+   * la bitacora de auditoria.
+   */
+  const duracionReal = (traza: SagaExecution | null): number | null => {
+    if (!traza?.finished_at) return null;
+    return new Date(traza.finished_at).getTime() - new Date(traza.started_at).getTime();
+  };
+
+  /**
+   * Sondeo secuencial: cada consulta espera a la anterior.
+   *
+   * Con setInterval las peticiones se solapaban —cada vuelta tarda entre dos y
+   * cuatro segundos y el intervalo era de uno y medio—, se acumulaban en la
+   * cola del navegador y la respuesta que traia el estado final llegaba con
+   * decenas de segundos de retraso. El resultado era una saga ya terminada en
+   * el servidor que en pantalla seguia "Procesando".
+   */
   const poll = useCallback(
     async (id: string) => {
+      if (!activeRef.current) return;
       try {
-        // El estado publico y la traza se leen a la vez: la interfaz necesita
-        // los dos, y pedirlos en serie duplicaria la latencia percibida.
         const [publico, traza] = await Promise.all([
           getTransfer(id),
           getSagaTrace(id).catch(() => null),
         ]);
+        if (!activeRef.current) return;
 
-        setTransfer(publico);
+        // La Saga es la fuente de verdad de su propio final. El estado del
+        // Gateway es una proyeccion que puede llegar unos segundos despues,
+        // porque las notificaciones salen en cola para no frenar la saga.
+        // Esperar a esa proyeccion dejaba la pantalla en "Procesando" con los
+        // cuatro pasos ya en verde.
+        const terminada = traza?.finished_at != null;
+        const estado = (
+          terminada && traza ? traza.gateway_status : publico.status
+        ) as TransferStatus;
+
+        setTransfer({ ...publico, status: estado });
         setSaga(traza);
         setSteps(derivarPasos(traza));
-        setElapsedTotal(Date.now() - startTimeRef.current);
 
-        if (TERMINAL_STATUSES.includes(publico.status)) {
-          // Una ultima lectura: la traza puede cerrarse un instante despues de
-          // que el Gateway ya publico el estado final.
-          const finalTrace = await getSagaTrace(id).catch(() => traza);
-          setSaga(finalTrace);
-          setSteps(derivarPasos(finalTrace));
-          setElapsedTotal(Date.now() - startTimeRef.current);
+        if (terminada || TERMINAL_STATUSES.includes(estado)) {
+          setElapsedTotal(duracionReal(traza) ?? Date.now() - startTimeRef.current);
           stop();
+          return;
         }
+        setElapsedTotal(Date.now() - startTimeRef.current);
       } catch {
-        // Errores transitorios de red no deben cortar el sondeo.
+        // Un fallo puntual de red no debe cortar el sondeo.
+      }
+      if (activeRef.current) {
+        timeoutRef.current = setTimeout(() => poll(id), intervalMs);
       }
     },
-    [stop],
+    [intervalMs, stop],
   );
 
   const startPolling = useCallback(
@@ -166,14 +199,14 @@ export function useTransferPolling(intervalMs = 1500): PollingResult {
       setElapsedTotal(0);
       setIsPolling(true);
       setSteps(pasosVacios());
+      activeRef.current = true;
 
-      poll(transferId);
-      timerRef.current = setInterval(() => poll(transferId), intervalMs);
+      void poll(transferId);
       tickRef.current = setInterval(() => {
-        setElapsedTotal(Date.now() - startTimeRef.current);
+        if (activeRef.current) setElapsedTotal(Date.now() - startTimeRef.current);
       }, 100);
     },
-    [intervalMs, poll, stop],
+    [poll, stop],
   );
 
   const reset = useCallback(() => {
@@ -186,7 +219,8 @@ export function useTransferPolling(intervalMs = 1500): PollingResult {
 
   useEffect(
     () => () => {
-      clearInterval(timerRef.current);
+      activeRef.current = false;
+      clearTimeout(timeoutRef.current);
       clearInterval(tickRef.current);
     },
     [],

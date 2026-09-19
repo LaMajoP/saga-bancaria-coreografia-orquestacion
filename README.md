@@ -1,5 +1,8 @@
 # NovaBank — Saga bancaria: coreografía vs. orquestación
 
+**Carlos Diaz · Maria Jose Palomino · Santiago Rodriguez**
+Arquitectura de Software Distribuida & Sistemas Transaccionales
+
 Transferencias interbancarias distribuidas implementadas con el **Patrón Saga**
 bajo el modelo BASE, en sus **dos modalidades**: un orquestador central
 implementado como flujo de Prefect, y una versión coreografiada sobre RabbitMQ.
@@ -214,11 +217,11 @@ cd api-gateway && PYTHONPATH=. pytest
 
 ## Reparto del trabajo
 
-| Persona | Entregable |
+| Integrante | Responsabilidad |
 |---|---|
-| 1 | API Gateway, Account & Ledger, Risk, Clearing, modelo de datos e idempotencia |
-| 2 | Saga orquestada y coreografiada, broker de eventos, compensaciones y documentación comparativa |
-| 3 | Frontend, simulador de caos, visualización de estados y casos de prueba |
+| **Maria Jose Palomino** | API Gateway, Account & Ledger, Risk, Clearing, modelo de datos e idempotencia |
+| **Carlos Diaz** | Saga orquestada y coreografiada, broker de eventos, compensaciones y documentación comparativa |
+| **Santiago Rodriguez** | Frontend, simulador de caos, visualización de estados y casos de prueba |
 
 ## Notas de operación
 

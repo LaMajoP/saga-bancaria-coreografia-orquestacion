@@ -8,6 +8,7 @@ in strictly reverse order.
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from app.clients.notifier import flush as flush_notifications, notify_async
 from app.core.logging import log_step
 from app.domain.errors import StepOutcome, outcome_for
 from app.domain.states import (
@@ -58,7 +59,7 @@ def _notify(
     if not context.settings.notify_gateway:
         return
     public = to_gateway_status(status)
-    context.gateway.notify_status(context.transfer_id, public.value, error_code, message)
+    notify_async(context.gateway, context.transfer_id, public.value, error_code, message)
 
 
 def execute_saga(
@@ -111,6 +112,7 @@ def execute_saga(
             operation="orchestration",
             status="COMPLETED",
         )
+        flush_notifications()
         return SagaResult(
             transfer_id=transfer_id,
             implementation=Implementation.ORCHESTRATION,
@@ -144,6 +146,7 @@ def execute_saga(
             error=failure.error_code,
             compensations="none",
         )
+        flush_notifications()
         return SagaResult(
             transfer_id=transfer_id,
             implementation=Implementation.ORCHESTRATION,
@@ -209,6 +212,7 @@ def execute_saga(
         compensation_status=compensation_status.value,
     )
 
+    flush_notifications()
     return SagaResult(
         transfer_id=transfer_id,
         implementation=Implementation.ORCHESTRATION,

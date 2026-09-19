@@ -13,6 +13,7 @@ from typing import Any
 
 from app.choreography.broker import EventBus
 from app.choreography.events import DomainEvent, EventType
+from app.clients.notifier import flush as flush_notifications, notify_async
 from app.core.logging import log_step
 from app.domain.errors import outcome_for
 from app.domain.states import (
@@ -288,8 +289,12 @@ def projector_handler(participant: Participant, event: DomainEvent) -> None:
 
     def notify(status: SagaStatus, error_code: str | None = None, message: str | None = None) -> None:
         if context.settings.notify_gateway:
-            context.gateway.notify_status(
-                event.transfer_id, to_gateway_status(status).value, error_code, message
+            notify_async(
+                context.gateway,
+                event.transfer_id,
+                to_gateway_status(status).value,
+                error_code,
+                message,
             )
 
     if event.event_type in _PROGRESS_STATUS:
@@ -307,6 +312,7 @@ def projector_handler(participant: Participant, event: DomainEvent) -> None:
             finished=True,
         )
         notify(SagaStatus.COMPLETED)
+        flush_notifications()
         return
 
     if event.event_type is EventType.TRANSFER_FAILED:
@@ -325,6 +331,7 @@ def projector_handler(participant: Participant, event: DomainEvent) -> None:
                 finished=True,
             )
             notify(final, error_code, message)
+            flush_notifications()
             return
         # The cause is recorded now, but the terminal state waits for the
         # rollback to finish, so the frontend can show COMPENSANDO in between.
@@ -357,6 +364,7 @@ def projector_handler(participant: Participant, event: DomainEvent) -> None:
             finished=True,
         )
         notify(final, execution.error_code, execution.message)
+        flush_notifications()
 
 
 def audit_handler(participant: Participant, event: DomainEvent) -> None:
